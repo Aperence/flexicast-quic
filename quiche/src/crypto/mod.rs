@@ -24,6 +24,8 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use std::convert::TryFrom;
+
 use ring::aead;
 use ring::hkdf;
 
@@ -112,6 +114,33 @@ impl Algorithm {
             Algorithm::AES256_GCM => 12,
             Algorithm::ChaCha20_Poly1305 => 12,
         }
+    }
+}
+
+impl TryFrom<u8> for Algorithm {
+    type Error = crate::Error;
+
+    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
+        Ok(match value {
+            0 => Algorithm::AES128_GCM,
+            1 => Algorithm::AES256_GCM,
+            2 => Algorithm::ChaCha20_Poly1305,
+            _ => return Err(Error::CryptoFail),
+        })
+    }
+}
+
+impl TryFrom<Algorithm> for u8 {
+    type Error = crate::Error;
+
+    fn try_from(value: Algorithm) -> std::result::Result<Self, Self::Error> {
+        Ok(
+            match value {
+                Algorithm::AES128_GCM => 0,
+                Algorithm::AES256_GCM => 1,
+                Algorithm::ChaCha20_Poly1305 => 2,
+            }
+        )
     }
 }
 

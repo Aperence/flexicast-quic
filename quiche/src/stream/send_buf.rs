@@ -33,6 +33,7 @@ use crate::Result;
 
 use crate::ranges;
 
+use super::flexicast::FcSendBuf;
 use super::RangeBuf;
 
 #[cfg(test)]
@@ -85,6 +86,21 @@ pub struct SendBuf {
 
     /// The error code received via STOP_SENDING.
     error: Option<u64>,
+
+    /// Used for flexicast. Set the maximum offset that the unicast source will
+    /// transmit. After that, it can consider that the stream is complete.
+    fc_max_offset: Option<u64>,
+
+    /// Whether the sending-side of the stream rotates and will potentially
+    /// start again after completion.
+    ///
+    /// Flexicast with stream rotation extension.
+    pub(super) fc_stream_rotate: bool,
+
+    /// Allows to rotate for unicast retransmission.
+    ///
+    /// Flexicast with stream rotation extension.
+    pub(super) fc_send_buf: Option<FcSendBuf>,
 }
 
 impl SendBuf {
@@ -229,6 +245,15 @@ impl SendBuf {
         // report final_size
         self.emit_off = cmp::max(self.emit_off, next_off);
 
+        // Flexicast with stream rotation and unicast retransmission.
+        // Maybe we emitted all data from the initial buffer, but some data must
+        // be retransmitted at a lower offset.
+        if out.len() - out_len == 0 && fin {
+            if let Some(fc_send) = self.fc_send_buf.as_mut() {
+                return fc_send.emit(out);
+            }
+        }
+
         Ok((out.len() - out_len, fin))
     }
 
@@ -253,6 +278,23 @@ impl SendBuf {
     }
 
     pub fn ack_and_drop(&mut self, off: u64, len: usize) {
+        // Flexicast.
+        // Maybe this is an ACK generated because of the `on_mc_timeout` but since
+        // the stream may have restarted (stream rotation extension) so do not
+        // consider this ack.
+        if self.fc_stream_rotate && self.off < off + len as u64 {
+            return;
+        }
+
+        // With Flexicast, stream rotation and unicast retransmission
+        // extension, this may happen if we buffer data for looping.
+        // Simply feed the ack to the inner buffer.
+        if off < self.ack_off() {
+            if let Some(fc_send_buf) = self.fc_send_buf.as_mut() {
+                fc_send_buf.ack_and_drop(off, len);
+            }
+        }
+
         self.ack(off, len);
 
         let ack_off = self.ack_off();
@@ -292,6 +334,23 @@ impl SendBuf {
             // it could be retransmitted, we might end up decreasing the SendBuf
             // position too much, so make sure that doesn't happen.
             self.pos = self.pos.saturating_sub(drop + 1);
+        }
+
+        // Flexicast with stream rotation and unicast retransmissions extension.
+        // If we acked all data but we still have some data that must be acked at
+        // a lower offset, we can take this internal buffer as the main buffer.
+        // We only perform this move if we do not have any more data to ack at the
+        // current offset before looping.
+        if self.data.is_empty() &&
+            self.fc_send_buf.as_ref().is_some_and(|s| {
+                s.get_send_buf().is_some_and(|s| !s.data.is_empty())
+            })
+        {
+            let fc_data = self.fc_send_buf.as_mut().unwrap();
+            let fc_send_buf = fc_data.take_send_buf();
+            if let Some(send_buf) = fc_send_buf {
+                self.fc_copy(*send_buf);
+            }
         }
     }
 
@@ -435,9 +494,26 @@ impl SendBuf {
     /// This happens when the stream's send final size is known, and the peer
     /// has already acked all stream data up to that point.
     pub fn is_complete(&self) -> bool {
+        let fc_rotation_is_complete =
+            if let Some(fc_send_buf) = self.fc_send_buf.as_ref() {
+                fc_send_buf.is_complete() ||
+                    fc_send_buf
+                        .get_send_buf()
+                        .map(|s| s.data.is_empty())
+                        .unwrap_or(true)
+            } else {
+                true
+            };
+
         if let Some(fin_off) = self.fin_off {
             if self.acked == (0..fin_off) {
-                return true;
+                return true && fc_rotation_is_complete;
+            }
+        }
+
+        if let Some(fc_fin_off) = self.fc_max_offset {
+            if self.acked == (0..fc_fin_off) {
+                return true && fc_rotation_is_complete;
             }
         }
 
@@ -484,6 +560,119 @@ impl SendBuf {
     #[allow(dead_code)]
     pub fn bufs_count(&self) -> usize {
         self.data.len()
+    }
+
+    /// Start a `SendBuf` from a given offset.
+    ///
+    /// This function is used for reliable flexicast as the unicast server may
+    /// need to retransmit some parts of a stream that has started on the
+    /// flexicast path.
+    pub fn reset_at(&mut self, off: u64) -> Result<()> {
+        let cur_off = self.off;
+        self.ack(cur_off, (off - cur_off) as usize);
+        self.off = off;
+        self.emit_off = off;
+        Ok(())
+    }
+
+    /// Inserts the given slice of data at the specified offset in the buffer.
+    ///
+    /// The number of bytes that were actually stored in the buffer is returned
+    /// (this may be lower than the size of the input buffer, in case of partial
+    /// writes).
+    ///
+    /// For simplification, only allow to write at offsets not already spanned
+    /// by the buffer. For example, calling this function with an offset of
+    /// 300 after a call with offset 500 will result in a [`Error::FinalSize`]
+    /// error. Future work may extend this to enable for in-between insertion of
+    /// stream data.
+    pub fn write_at_offset(
+        &mut self, data: &[u8], offset: u64, fin: bool,
+    ) -> Result<usize> {
+        // We "fill" the buffer with no data until we reach the expected offset.
+        // This "no data" is never sent, and we ask to retransmit this chunk of
+        // data only.
+        if self.off > offset {
+            // If the data offset is lower than the current offset, we can try to
+            // buffer it if stream rotation is enabled.
+            if let Some(fc_send) = self.fc_send_buf.as_mut() {
+                return fc_send.write_at_offset(data, offset, fin);
+            } else {
+                return Err(Error::FinalSize);
+            }
+        } else if self.off != offset {
+            self.reset_at(offset)?;
+        }
+        let written = self.write(data, fin)?;
+        self.retransmit(offset, written);
+
+        Ok(written)
+    }
+
+    /// Used for flexicast purpose. This `SendBuf` stream will not receive any
+    /// more data, even if the stream is not finished regarding the initial
+    /// version of QUIC. Returns an error if the value was already set
+    /// previously.
+    pub fn fc_set_close_offset(&mut self) {
+        self.fc_max_offset = Some(self.off);
+    }
+
+    /// Sets the fin offset.
+    pub fn fc_set_fin_off(&mut self, off: u64) {
+        self.fin_off = Some(off);
+    }
+
+    /// Copies the sate of another [`SendBuf`] into self.
+    ///
+    /// Flexicast with stream rotation and unicast retransmission extension.
+    fn fc_copy(&mut self, other: SendBuf) {
+        self.data = other.data;
+        self.acked = other.acked;
+        self.off = other.off;
+        self.len = other.len;
+        self.pos = other.pos;
+        self.emit_off = other.emit_off;
+        self.max_data = other.max_data;
+        self.blocked_at = other.blocked_at;
+        self.fin_off = other.fin_off;
+        self.shutdown = other.shutdown;
+        self.error = other.error;
+        self.fc_max_offset = other.fc_max_offset; // RFC-TODO: not sure about this one.
+        self.fc_stream_rotate = other.fc_stream_rotate;
+        self.fc_send_buf = Some(FcSendBuf::new(self.max_data));
+    }
+
+    /// Whether the structure already contains an
+    /// [`crate::stream::flexicast::FcSendBuf`] structure.
+    pub fn fc_rotate_retransmission(&self) -> bool {
+        self.fc_send_buf.is_some()
+    }
+
+    /// Returns the offset of the stream when considering flexicast stream
+    /// rotation with unicast retransmission.
+    pub fn fc_off_front(&self) -> u64 {
+        let mut pos = self.pos;
+
+        // Skip empty buffers from the start of the queue.
+        while let Some(b) = self.data.get(pos) {
+            if !b.is_empty() {
+                return b.off();
+            }
+
+            pos += 1;
+        }
+
+        if let Some(fc_send_buf) = self.fc_send_buf.as_ref() {
+            if let Some(send_buf) = fc_send_buf.get_send_buf() {
+                return send_buf.off_front();
+            }
+        }
+
+        self.off
+    }
+
+    pub(crate) fn fc_emit_off(&self) -> u64 {
+        self.emit_off
     }
 }
 
@@ -777,5 +966,101 @@ mod tests {
         let (fin_off, unsent) = send.stop(0).unwrap();
         assert_eq!(fin_off, 50);
         assert_eq!(unsent, 0);
+    }
+
+    #[test]
+    fn send_buf_reset_at() {
+        let mut send = SendBuf::new(std::u64::MAX);
+        let mut buf = [0u8; 10];
+
+        assert_eq!(send.reset_at(500), Ok(()));
+        assert_eq!(send.data, VecDeque::new());
+        assert_eq!(send.emit_off, 500);
+        assert_eq!(send.off, 500);
+        assert_eq!(send.len, 0);
+
+        assert_eq!(send.write(b"hello", false), Ok(5));
+        assert_eq!(send.write(b", world", true), Ok(7));
+        assert!(send.is_fin());
+
+        assert_eq!(send.emit(&mut buf), Ok((10, false)));
+        assert_eq!(&buf[..], b"hello, wor");
+        assert_eq!(send.emit_off, 510);
+        assert_eq!(send.off, 512);
+
+        assert_eq!(send.emit(&mut buf), Ok((2, true)));
+        assert_eq!(send.emit_off, 512);
+        assert_eq!(send.off, 512);
+        assert_eq!(&buf[..2], b"ld");
+
+        send.retransmit(500, 5);
+        assert_eq!(send.emit(&mut buf), Ok((5, false)));
+        assert_eq!(&buf[..5], b"hello");
+
+        send.ack(500, 12);
+    }
+
+    #[test]
+    /// Tests the extensions of `StreamBuf` to create a stream and send only
+    /// chunks at specific offsets.
+    fn send_buf_partial_chunks() {
+        let mut send = SendBuf::new(std::u64::MAX);
+        let mut buf = [0u8; 10];
+
+        assert_eq!(send.write_at_offset(b"hello", 100, false), Ok(5));
+        assert_eq!(send.write_at_offset(b", world!", 500, false), Ok(8));
+        assert_eq!(send.emit(&mut buf), Ok((5, false)));
+        assert_eq!(&buf[..5], b"hello");
+        assert_eq!(send.emit(&mut buf), Ok((8, false)));
+        assert_eq!(&buf[..8], b", world!");
+
+        assert_eq!(send.write_at_offset(b"test1000", 1000, false), Ok(8));
+        assert_eq!(
+            send.write_at_offset(b"test1000+8", 1007, false),
+            Err(Error::FinalSize)
+        );
+        assert_eq!(send.write_at_offset(b"test1000+8", 1008, false), Ok(10));
+        assert_eq!(
+            send.write_at_offset(b"test1000+8", 1017, false),
+            Err(Error::FinalSize)
+        );
+        assert_eq!(send.write_at_offset(b"test1000+1xx", 1100, true), Ok(12));
+        assert_eq!(send.emit(&mut buf), Ok((10, false)));
+        assert_eq!(&buf[..], b"test1000te");
+        assert_eq!(send.emit(&mut buf), Ok((8, false)));
+        assert_eq!(&buf[..8], b"st1000+8");
+        assert_eq!(send.emit(&mut buf), Ok((10, false)));
+        assert_eq!(&buf[..], b"test1000+1");
+        assert_eq!(send.emit(&mut buf), Ok((2, true)));
+        assert_eq!(&buf[..2], b"xx");
+
+        send.ack(100, 5);
+        send.ack(500, 8);
+        send.ack(1000, 8);
+        send.ack(1008, 10);
+        send.ack(1100, 12);
+        assert!(send.is_complete());
+    }
+
+    #[test]
+    fn send_buf_partial_chunks_unifished() {
+        let mut send = SendBuf::new(std::u64::MAX);
+        let mut buf = [0u8; 10];
+
+        assert_eq!(send.write_at_offset(b"hello", 100, false), Ok(5));
+        assert_eq!(send.fc_max_offset, None);
+        send.fc_set_close_offset();
+        assert_eq!(send.fc_max_offset, Some(105));
+        assert_eq!(send.write_at_offset(b", world!", 500, false), Ok(8));
+        send.fc_set_close_offset();
+        assert_eq!(send.fc_max_offset, Some(508));
+        assert_eq!(send.emit(&mut buf), Ok((5, false)));
+        assert_eq!(&buf[..5], b"hello");
+        assert_eq!(send.emit(&mut buf), Ok((8, false)));
+        assert_eq!(&buf[..8], b", world!");
+
+        send.ack(100, 5);
+        send.ack(500, 8);
+        assert!(send.is_complete());
     }
 }
