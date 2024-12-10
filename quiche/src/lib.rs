@@ -122,7 +122,7 @@
 //! loop {
 //!     let (read, from) = socket.recv_from(&mut buf).unwrap();
 //!
-//!     let recv_info = quiche::RecvInfo { from, to };
+//!     let recv_info = quiche::RecvInfo { from, to, from_mc: false, };
 //!
 //!     let read = match conn.recv(&mut buf[..read], recv_info) {
 //!         Ok(v) => v,
@@ -2284,6 +2284,7 @@ impl Connection {
     ///     let recv_info = quiche::RecvInfo {
     ///         from,
     ///         to: local,
+    ///         from_mc: false,
     ///     };
     ///
     ///     let read = match conn.recv(&mut buf[..read], recv_info) {
@@ -2710,6 +2711,28 @@ impl Connection {
                 .get(epoch)
                 .crypto_0rtt_open
                 .as_ref()
+        } else if info.from_mc {
+            // The flexicast flow uses the shared key.
+            if let Some(flexicast) = self.flexicast.as_ref() {
+                // The client might not be able to process the packets because
+                // they left.
+                match flexicast.get_mc_role() {
+                    flexicast::McRole::Client(
+                        flexicast::McClientStatus::ListenMcPath(true),
+                    ) |
+                    flexicast::McRole::Client(
+                        flexicast::McClientStatus::JoinedAndKey,
+                    ) => flexicast.get_mc_crypto_open(),
+                    flexicast::McRole::Client(_) =>
+                        self.pkt_num_spaces.crypto.get(epoch).crypto_open.as_ref(),
+                    e =>
+                        return Err(Error::Flexicast(
+                            flexicast::FcError::McInvalidRole(e),
+                        )),
+                }
+            } else {
+                return Err(Error::Flexicast(flexicast::FcError::McDisabled));
+            }
         } else {
             // Otherwise use the packet number space's main key.
             self.pkt_num_spaces.crypto.get(epoch).crypto_open.as_ref()
@@ -2845,9 +2868,16 @@ impl Connection {
             }
         }
 
+        // For the flexicast flow, the space_id is always 1.
+        let space_id_to_decrypt = if info.from_mc {
+            1 // Always 1 for the flexicast source.
+        } else {
+            space_id as u32
+        };
+
         let mut payload = packet::decrypt_pkt(
             &mut b,
-            space_id as u32,
+            space_id_to_decrypt,
             pn,
             pn_len,
             payload_len,
@@ -3906,28 +3936,25 @@ impl Connection {
                     },
 
                     frame::Frame::McAnnounce { channel_id, .. } =>
-                                if let Some(flexicast) = self.flexicast.as_mut() {
-                                    if let Some(mc_announce_data) = flexicast
-                                        .get_mut_mc_announce_data_by_cid(
-                                            &channel_id,
-                                        )
-                                    {
-                                        mc_announce_data
-                                            .set_mc_announce_processed(false);
-                                    }
-                                },
+                        if let Some(flexicast) = self.flexicast.as_mut() {
+                            if let Some(mc_announce_data) = flexicast
+                                .get_mut_mc_announce_data_by_cid(&channel_id)
+                            {
+                                mc_announce_data.set_mc_announce_processed(false);
+                            }
+                        },
 
-                            frame::Frame::McKey { .. } => {
-                                if let Some(flexicast) = self.flexicast.as_mut() {
-                                    flexicast.set_mc_key_read(false);
-                                }
-                            },
+                    frame::Frame::McKey { .. } => {
+                        if let Some(flexicast) = self.flexicast.as_mut() {
+                            flexicast.set_mc_key_read(false);
+                        }
+                    },
 
-                            frame::Frame::McState { .. } => {
-                                if let Some(flexicast) = self.flexicast.as_mut() {
-                                    flexicast.set_mc_state_in_flight(false);
-                                }
-                            },
+                    frame::Frame::McState { .. } => {
+                        if let Some(flexicast) = self.flexicast.as_mut() {
+                            flexicast.set_mc_state_in_flight(false);
+                        }
+                    },
 
                     _ => (),
                 }
@@ -7902,7 +7929,7 @@ impl Connection {
                 self.paths.has_path_status() ||
                 send_path.needs_ack_eliciting ||
                 send_path.probing_required()) ||
-                self.fc_has_control_data(send_pid)
+            self.fc_has_control_data(send_pid)
         {
             // Only clients can send 0-RTT packets.
             if !self.is_server && self.is_in_early_data() {
@@ -8738,7 +8765,10 @@ impl Connection {
                                     let fc_space_id = self.create_mc_path(
                                         src_addr, dst_addr, false,
                                     )?;
-                                    println!("After creating the path: {}", self.is_server);
+                                    println!(
+                                        "After creating the path: {}",
+                                        self.is_server
+                                    );
                                     // self.set_mc_space_id(fc_space_id)?;
                                 }
                             }
@@ -8754,7 +8784,7 @@ impl Connection {
                 key,
                 algo,
                 first_pn,
-            } => {
+            } =>
                 if self.is_server {
                     return Err(Error::Flexicast(
                         flexicast::FcError::McInvalidRole(
@@ -8781,8 +8811,7 @@ impl Connection {
                     return Err(Error::Flexicast(
                         flexicast::FcError::McInvalidSymKey,
                     ));
-                }
-            },
+                },
         };
         Ok(())
     }
