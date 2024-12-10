@@ -1,10 +1,5 @@
 //! Flexicast extension for QUIC.
 
-use std::cmp;
-use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::collections::VecDeque;
 use std::convert::TryFrom;
 use std::convert::TryInto;
 use std::io::BufRead;
@@ -18,10 +13,13 @@ use crate::ranges::RangeSet;
 // use crate::recovery::flexicast::FcRecovery;
 use crate::CongestionControlAlgorithm;
 use crate::SendInfo;
+use reliable::RFcRecv;
+use reliable::RFcSource;
+use reliable::RFcUcPath;
+use reliable::ReliableFc;
 use ring::rand;
 use ring::rand::SecureRandom;
 use ring::signature;
-use ring::signature::KeyPair;
 
 use crate::accept;
 use crate::connect;
@@ -322,6 +320,10 @@ pub struct FlexicastAttributes {
     /// Concretelly, it will make PATH_ACK frames for the flexicast flow ack
     /// eliciting by adding a PING frame.
     pub(crate) fc_make_ack_elicit: bool,
+
+    /// Structure handling the reliability between the flexicast flow and the
+    /// unicast paths.
+    pub(crate) fc_reliable: ReliableFc,
 }
 
 impl FlexicastAttributes {
@@ -658,10 +660,10 @@ impl Default for FlexicastAttributes {
             fc_path_id: None,
             mc_client_left_need_sync: false,
             mc_state_in_flight: false,
-            // mc_reliable: ReliableMc::Undefined,
             fc_chan_id: None,
             fc_make_ack_elicit: false,
             fc_first_pn: None,
+            fc_reliable: ReliableFc::Undefined,
         }
     }
 }
@@ -903,6 +905,14 @@ impl FlexicastConnection for Connection {
 
         if let Some(flexicast) = self.flexicast.as_mut() {
             flexicast.mc_announce_data.push(mc_announce_data.clone());
+
+            // Create the reliable structure on the flexicast flow.
+            if let McRole::ServerFlexicast = flexicast.mc_role {
+                if matches!(flexicast.fc_reliable, ReliableFc::Undefined) {
+                    flexicast.fc_reliable =
+                        ReliableFc::FcFlow(RFcSource::default());
+                }
+            }
         } else {
             // Flexicast structure does not exist yet.
             let mc_role = if self.is_server {
@@ -912,9 +922,16 @@ impl FlexicastConnection for Connection {
             };
             let mut mc_data_cloned = mc_announce_data.clone();
             mc_data_cloned.is_processed = !self.is_server;
+
+            let fc_reliable = if self.is_server {
+                ReliableFc::UcPath(RFcUcPath::default())
+            } else {
+                ReliableFc::Receiver(RFcRecv::default())
+            };
             self.flexicast = Some(FlexicastAttributes {
                 mc_role,
                 mc_announce_data: vec![mc_data_cloned],
+                fc_reliable,
                 ..Default::default()
             });
         }
@@ -958,6 +975,9 @@ impl FlexicastConnection for Connection {
         } else {
             (flexicast.mc_announce_data[0].channel_id.clone(), 0)
         });
+
+        // Create the reliability structure on the receiver.
+        flexicast.fc_reliable = ReliableFc::Receiver(RFcRecv::default());
 
         flexicast.update_client_state(FcClientAction::Join, None)
     }
@@ -1088,6 +1108,16 @@ impl FlexicastConnection for Connection {
         &mut self, fc_flow: &mut Connection, now: time::Instant,
     ) -> Result<()> {
         Ok(())
+    }
+}
+
+impl Connection {
+    /// Returns whether flexicast is enabled and the path ID corresponds to the
+    /// flexicast flow.
+    pub fn is_flexicast_flow(&self, path_id: u64) -> bool {
+        self.flexicast.as_ref().is_some_and(|fc| {
+            fc.fc_path_id.is_some_and(|fcid| fcid == path_id)
+        })
     }
 }
 
@@ -1875,10 +1905,8 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
 
-    use crate::testing;
-
-    use crate::flexicast::testing::get_test_mc_channel_source;
     use crate::flexicast::testing::get_test_mc_config;
+    use crate::testing;
 
     use super::testing::FlexicastPipe;
     use super::*;
@@ -2066,3 +2094,6 @@ mod tests {
         }
     }
 }
+
+pub mod ack;
+pub mod reliable;

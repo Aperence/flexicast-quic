@@ -94,6 +94,12 @@ impl McAck {
         self.acked_full.take()
     }
 
+    #[cfg(test)]
+    /// Polls the fully acknowledged packets.
+    pub fn full_ack_poll(&self) -> Option<&RangeSet> {
+        self.acked_full.as_ref()
+    }
+
     /// Sets the largest packet number in the structure.
     /// This drains entries that are below this value.
     pub fn drain_packets(&mut self, largest_pn: Option<u64>) {
@@ -359,7 +365,7 @@ impl Connection {
     pub(crate) fn get_mc_ack_mut(&mut self) -> Option<&mut McAck> {
         self.flexicast
             .as_mut()
-            .map(|mc| mc.rmc_get_mut().source_mut().map(|rs| &mut rs.mc_ack))
+            .map(|mc| mc.fc_reliable.source_mut().map(|rs| &mut rs.mc_ack))
             .flatten()
     }
 }

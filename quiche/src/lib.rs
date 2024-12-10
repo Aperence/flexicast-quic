@@ -386,6 +386,7 @@ use cid::PathIdIter;
 use flexicast::FcError;
 use flexicast::FlexicastAttributes;
 use flexicast::FlexicastConnection;
+use flexicast::McRole;
 #[cfg(feature = "qlog")]
 use qlog::events::connectivity::ConnectivityEventType;
 #[cfg(feature = "qlog")]
@@ -4171,6 +4172,7 @@ impl Connection {
         }
 
         // Create PATH_ACK frames if needed.
+        println!("Is server={} before PATH_ACK", self.is_server);
         if multiple_application_data_pkt_num_spaces &&
             !is_closing &&
             path.active()
@@ -4263,6 +4265,47 @@ impl Connection {
                             } else {
                                 pns.ack_elicited = false;
                             }
+                        }
+                    }
+                }
+            } else if self.flexicast.as_ref().is_some_and(|fc| {
+                matches!(
+                    fc.get_mc_role(),
+                    McRole::Client(flexicast::McClientStatus::ListenMcPath(true))
+                )
+            }) {
+                // Flexicast reliable.
+                // Because the receiver cannot send packets on the flexicast
+                // flow, it will never send a PATH_ACK frame for this flow
+                // without sending a PATH_ACK for the unicast path.
+                // If it is not the case, we trigger sending such PATH_ACK for
+                // the flexicast flow on the unicast path.
+                let flexicast = self.flexicast.as_ref().unwrap();
+                if let Some(fcf_id) = flexicast.get_fc_path_id() {
+                    let pns =
+                        self.pkt_num_spaces.spaces.get_mut(epoch, fcf_id)?;
+                    if pns.recv_pkt_need_ack.len() > 0 &&
+                        (pns.ack_elicited || ack_elicit_required)
+                    {
+                        let ack_delay = pns.largest_rx_pkt_time.elapsed();
+
+                        let ack_delay = ack_delay.as_micros() as u64 /
+                            2_u64.pow(
+                                self.local_transport_params.ack_delay_exponent
+                                    as u32,
+                            );
+
+                        let frame = frame::Frame::PathAck {
+                            path_identifier: fcf_id,
+                            ack_delay,
+                            ranges: pns.recv_pkt_need_ack.clone(),
+                            ecn_counts: None, /* sending ECN is not
+                                               * supported at
+                                               * this time */
+                        };
+
+                        if push_frame_to_pkt!(b, frames, frame, left) {
+                            pns.ack_elicited = false;
                         }
                     }
                 }
@@ -8488,6 +8531,10 @@ impl Connection {
                 ack_delay,
                 ..
             } => {
+                println!(
+                    "RECEIVE PathAck frame: {:?} and {}",
+                    ranges, path_identifier
+                );
                 if !self.use_path_pkt_num_space(epoch) {
                     return Err(Error::PathIdViolation);
                 }
@@ -8546,6 +8593,19 @@ impl Connection {
                 // Once the handshake is confirmed, we can drop Handshake keys.
                 if self.handshake_confirmed {
                     self.drop_epoch_state(packet::Epoch::Handshake, now);
+                }
+
+                // Flexicast reliability.
+                // The unicast path records the acknowledgments from the
+                // receiver to later give them to the flexicast flow.
+                if self.is_flexicast_flow(path_identifier) {
+                    // Safe unwrap because was true.
+                    let flexicast = self.flexicast.as_mut().unwrap();
+                    
+                    // Sanity check: should be the unicast path.
+                    if let Some(rfc) = flexicast.fc_reliable.server_mut() {
+                        rfc.mc_ack.on_ack_received(&ranges);
+                    }
                 }
             },
 
@@ -8764,7 +8824,10 @@ impl Connection {
                                     let fc_space_id = self.create_mc_path(
                                         src_addr, dst_addr, false,
                                     )?;
-                                    // self.set_mc_space_id(fc_space_id)?;
+                                    self.flexicast
+                                        .as_mut()
+                                        .unwrap()
+                                        .set_fc_path_id(fc_space_id);
                                 }
                             }
                         }
@@ -9100,6 +9163,25 @@ impl Connection {
 
             if let Some(pid) = probing.next() {
                 return Ok(pid);
+            }
+        }
+
+        // If flexicast is enabled, receivers cannot send packets on the flexicast
+        // flow because it is unidirectional.
+        if let Some(flexicast) = self.flexicast.as_ref() {
+            if matches!(
+                flexicast.get_mc_role(),
+                McRole::Client(_) | McRole::ServerUnicast(_)
+            ) {
+                if let Some(path_id) = flexicast.get_fc_path_id() {
+                    return Ok(self
+                        .pkt_num_spaces
+                        .spaces
+                        .application_data_space_ids()
+                        .find(|&id| id != path_id)
+                        .ok_or(Error::Flexicast(FcError::McPath))?
+                        as usize);
+                }
             }
         }
 

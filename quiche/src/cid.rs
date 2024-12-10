@@ -972,7 +972,6 @@ impl ConnectionIdentifiers {
         reset_token: Option<u128>, advertise: bool,
         network_path: Option<FourTuple>, retire_if_needed: bool,
     ) -> Result<u64> {
-        println!("New SCID! {path_id}");
         if self.zero_length_scid {
             return Err(Error::InvalidState);
         }
@@ -986,7 +985,6 @@ impl ConnectionIdentifiers {
             Some(p) =>
                 p.new_scid(cid, reset_token, network_path, retire_if_needed)?,
             None => {
-                println!("None here... push hence");
                 // Are we requesting some valid max path?
                 if path_id > self.max_path_id() {
                     return Err(Error::OutOfPathId);
@@ -1046,7 +1044,6 @@ impl ConnectionIdentifiers {
         reset_token: u128, retire_prior_to: u64,
         retired_path_ids: &mut SmallVec<[(u64, FourTuple); 1]>,
     ) -> Result<()> {
-        println!("NEW DCID on path_id={path_id}");
         if self.zero_length_dcid {
             return Err(Error::InvalidState);
         }
