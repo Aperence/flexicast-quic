@@ -520,8 +520,7 @@ impl FlexicastAttributes {
         match self.mc_role {
             McRole::Client(status) => match status {
                 McClientStatus::WaitingToJoin => true,
-                McClientStatus::JoinedAndKey if self.fc_path_id.is_some() =>
-                    true,
+                McClientStatus::JoinedAndKey if self.fc_path_id.is_some() => true,
                 McClientStatus::Leaving(false) => true,
                 McClientStatus::Changing => true,
                 _ => false,
@@ -918,7 +917,6 @@ impl FlexicastConnection for Connection {
                 mc_announce_data: vec![mc_data_cloned],
                 ..Default::default()
             });
-            println!("Set server flexicast data!");
         }
 
         Ok(())
@@ -1032,51 +1030,46 @@ impl FlexicastConnection for Connection {
             }
         }
 
-        println!("To uc server: {}", to_uc_server);
-
         let pid = if to_uc_server {
             info!("Client creates flexicast path?");
-            self.probe_path(client_addr, server_addr).map(|(pid, _)| pid)
+            self.probe_path(client_addr, server_addr)
+                .map(|(pid, _)| pid)
         } else {
             // Create a new path on the client.
-            // If this is the server, temporarily give "client" behaviour to create the path implicitly.
+            // If this is the server, temporarily give "client" behaviour to
+            // create the path implicitly.
             let was_server = self.is_server;
             self.is_server = false;
-            println!("K1");
             let pid = match self.create_path_on_client(client_addr, server_addr) {
                 Ok(v) => v,
                 Err(e) => {
                     self.is_server = was_server;
                     return Err(e);
-                }
+                },
             };
-            println!("K2");
             match self.set_active(client_addr, server_addr, true) {
                 Ok(()) => (),
                 Err(e) => {
                     self.is_server = was_server;
                     return Err(e);
-                }
+                },
             }
-            println!("K3");
 
             let path = match self.paths.get_mut(pid) {
                 Ok(v) => v,
                 Err(e) => {
                     self.is_server = was_server;
                     return Err(e);
-                }
+                },
             };
-            println!("K4");
             let pid = match path.active_dcid_seq.ok_or(Error::InvalidState) {
                 Ok(v) => v,
                 Err(e) => {
                     self.is_server = was_server;
                     return Err(e);
-                }
+                },
             };
             self.is_server = was_server;
-            println!("K5");
 
             Ok(pid)
         }?;
@@ -1250,7 +1243,8 @@ impl FlexicastChannelSource {
             .expect("no such path");
         let mc_path_server = conn_server.paths.get_mut(pid_s2c_1)?;
 
-        conn_server.flexicast.as_mut().unwrap().fc_path_id = Some(pid_s2c_1 as u64);
+        conn_server.flexicast.as_mut().unwrap().fc_path_id =
+            Some(pid_s2c_1 as u64);
 
         // Set the new path active.
         conn_client.set_active(mc_path_info.local, mc_path_info.peer, true)?;
@@ -1261,7 +1255,8 @@ impl FlexicastChannelSource {
             mc_role: McRole::Client(McClientStatus::Unspecified),
             ..FlexicastAttributes::default()
         });
-        conn_client.flexicast.as_mut().unwrap().fc_path_id = Some(pid_c2s_1 as u64);
+        conn_client.flexicast.as_mut().unwrap().fc_path_id =
+            Some(pid_c2s_1 as u64);
 
         // Remove packets that need acknowledgment from the flexicast source.
         conn_server
@@ -1427,14 +1422,17 @@ pub struct FcConfig {
 
 impl Default for FcConfig {
     fn default() -> Self {
-        Self {
+        let mut fc_config = Self {
             mc_announce_data: vec![testing::get_test_mc_announce_data()],
             mc_announce_to_join: 0,
             probe_mc_path: true,
             fc_tp: true,
             max_data: 5_000_000_000,
             max_stream_data: 1_000_000_000,
-        }
+        };
+        fc_config.mc_announce_data[0].probe_path = fc_config.probe_mc_path;
+
+        fc_config
     }
 }
 
@@ -1632,7 +1630,6 @@ pub mod testing {
                 &fc_config.mc_announce_data[fc_config.mc_announce_to_join]
                     .channel_id,
             );
-            println!("----------------------");
             pipe.client.add_mc_cid(&scid).unwrap();
             assert_eq!(pipe.advance(), Ok(()));
 
@@ -2043,26 +2040,29 @@ mod tests {
     #[test]
     /// Tests that the flexicast pipe correctly initiates and sends some data.
     fn test_fc_pipe_initiates_and_sends() {
-        let mut fc_config = FcConfig {
-            probe_mc_path: false,
-            ..Default::default()
-        };
-        let mut fc_pipe = FlexicastPipe::new(
-            3,
-            "/tmp/test_fc_pipe.txt",
-            &mut fc_config,
-        )
-        .unwrap();
+        for probe_path in [true, false] {
+            let mut fc_config = FcConfig {
+                probe_mc_path: probe_path,
+                ..Default::default()
+            };
+            let mut fc_pipe =
+                FlexicastPipe::new(3, "/tmp/test_fc_pipe.txt", &mut fc_config)
+                    .unwrap();
 
-        assert!(fc_pipe.source_send_single_stream(true, None, 3).is_ok());
-        assert!(fc_pipe.source_send_single_stream(true, None, 7).is_ok());
-        assert!(fc_pipe.source_send_single_stream(true, None, 11).is_ok());
+            assert!(fc_pipe.source_send_single_stream(true, None, 3).is_ok());
+            assert!(fc_pipe.source_send_single_stream(true, None, 7).is_ok());
+            assert!(fc_pipe.source_send_single_stream(true, None, 11).is_ok());
 
-        // Assert all receivers correctly receive the stream.
-        for i in 0..3 {
-            let mut readables = fc_pipe.unicast_pipes[i].0.client.readable().collect::<Vec<_>>();
-            readables.sort();;
-            assert_eq!(readables, vec![3, 7, 11]);
+            // Assert all receivers correctly receive the stream.
+            for i in 0..3 {
+                let mut readables = fc_pipe.unicast_pipes[i]
+                    .0
+                    .client
+                    .readable()
+                    .collect::<Vec<_>>();
+                readables.sort();
+                assert_eq!(readables, vec![3, 7, 11]);
+            }
         }
     }
 }

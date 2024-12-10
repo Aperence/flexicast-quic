@@ -8675,7 +8675,7 @@ impl Connection {
                 public_key,
                 bitrate,
             } => {
-                println!("Received an FC_ANNOUNCE frame! FC_ANNOUNCE channel ID={:?}, probe_path={}, is_ipv6_addr={}, reset_stream_on_joih={}, source_ip={:?}, group_ip={:?}, udp_port={}, bitrate={:?}", channel_id, probe_path, is_ipv6_addr, reset_stream_on_join, source_ip, group_ip, udp_port, bitrate);
+                debug!("Received an FC_ANNOUNCE frame! FC_ANNOUNCE channel ID={:?}, probe_path={}, is_ipv6_addr={}, reset_stream_on_joih={}, source_ip={:?}, group_ip={:?}, udp_port={}, bitrate={:?}", channel_id, probe_path, is_ipv6_addr, reset_stream_on_join, source_ip, group_ip, udp_port, bitrate);
                 if self.is_server {
                     error!("The server should not receive an FC_ANNOUNCE frame!");
                     return Err(Error::InvalidFrame);
@@ -8712,7 +8712,7 @@ impl Connection {
                 // The client can also receive an MC_STATE.
                 // It can be used to request for a channel leave.
                 if let Some(flexicast) = self.flexicast.as_mut() {
-                    println!(
+                    debug!(
                         "Received an MC_STATE frame! channel ID: {:?}, action: {:?}, action_data: {} and current mc_role: {:?}",
                         channel_id, flexicast::FcClientAction::try_from(action)?, action_data, flexicast.get_mc_role(),
                     );
@@ -8761,14 +8761,9 @@ impl Connection {
                                         dst_addr,
                                         mc_announce.udp_port,
                                     );
-                                    println!("Before creating the path");
                                     let fc_space_id = self.create_mc_path(
                                         src_addr, dst_addr, false,
                                     )?;
-                                    println!(
-                                        "After creating the path: {}",
-                                        self.is_server
-                                    );
                                     // self.set_mc_space_id(fc_space_id)?;
                                 }
                             }
