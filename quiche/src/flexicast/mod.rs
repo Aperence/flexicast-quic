@@ -10,7 +10,7 @@ use crate::packet::Epoch;
 use crate::rand::rand_bytes;
 use crate::ranges;
 use crate::ranges::RangeSet;
-// use crate::recovery::flexicast::FcRecovery;
+use crate::recovery::flexicast::FcRecovery;
 use crate::CongestionControlAlgorithm;
 use crate::SendInfo;
 use reliable::RFcRecv;
@@ -68,6 +68,28 @@ macro_rules! fc_chan_idx {
             .as_ref()
             .map(|(_, idx)| *idx)
             .ok_or(Error::Flexicast(FcError::McAnnounce))
+    };
+}
+
+/// Shortcut to get the flexicast attributes.
+#[macro_export]
+macro_rules! fca {
+    ( $conn:expr ) => {
+        $conn
+            .flexicast
+            .as_ref()
+            .ok_or(Error::Flexicast(FcError::McDisabled))
+    };
+}
+
+/// Shortcut to get the flexicast attributes as mutable.
+#[macro_export]
+macro_rules! fca_mut {
+    ( $conn:expr ) => {
+        $conn
+            .flexicast
+            .as_mut()
+            .ok_or(Error::Flexicast(FcError::McDisabled))
     };
 }
 
@@ -1050,7 +1072,7 @@ impl FlexicastConnection for Connection {
             }
         }
 
-        let pid = if to_uc_server {
+        let path_id = if to_uc_server {
             info!("Client creates flexicast path?");
             self.probe_path(client_addr, server_addr)
                 .map(|(pid, _)| pid)
@@ -1094,10 +1116,11 @@ impl FlexicastConnection for Connection {
             Ok(pid)
         }?;
 
-        let path = self.paths.get_mut(pid as usize)?;
-        // path.recovery.fc_recovery = Some(FcRecovery::new(pid, false));
+        let pid = self.paths.pid_from_path_id(path_id).unwrap();
+        let path = self.paths.get_mut(pid)?;
+        path.recovery.fc_recovery = Some(FcRecovery::new(false));
 
-        Ok(pid)
+        Ok(path_id)
     }
 
     fn get_flexicast_attributes(&self) -> Option<&FlexicastAttributes> {
@@ -1107,6 +1130,97 @@ impl FlexicastConnection for Connection {
     fn uc_to_fc_control(
         &mut self, fc_flow: &mut Connection, now: time::Instant,
     ) -> Result<()> {
+        // Sanity check.
+        if let Some(flexicast) = fc_flow.flexicast.as_ref() {
+            if !matches!(flexicast.mc_role, McRole::ServerFlexicast) {
+                return Err(Error::Flexicast(FcError::McInvalidRole(
+                    McRole::ServerFlexicast,
+                )));
+            }
+        } else {
+            return Err(Error::Flexicast(FcError::McDisabled));
+        }
+
+        // First packet that the receiver must receive.
+        // This value will be forwarded in the FC_KEY frame.
+        if let Some(rfc) = self
+            .flexicast
+            .as_mut()
+            .map(|fc| fc.fc_reliable.server_mut())
+            .flatten()
+        {
+            let fc_flow_next_pn = fc_flow.fc_next_pn();
+            if rfc.fc_highest_pn.is_none() {
+                rfc.fc_highest_pn = fc_flow_next_pn;
+            }
+
+            // Notify the flexicast flow that there is a new receiver.
+            if let Some(rfc_source) = fc_flow.get_mc_ack_mut() {
+                if !rfc.notified_fc_source {
+                    rfc_source.new_recv(fc_flow_next_pn.unwrap_or(0));
+    
+                    rfc.notified_fc_source = true;
+                }
+            }
+        }
+
+        // The unicast path notifies the flexicast flow through the McAck the new
+        // packets that have been acked by the receiver. Also notifies the
+        // streams.
+        if let (Some(rfc), Some(mc_ack)) = (
+            self.flexicast
+                .as_mut()
+                .map(|fc| fc.fc_reliable.server_mut())
+                .flatten(),
+            fc_flow.get_mc_ack_mut(),
+        ) {
+            // Value consumed.
+            let new_ack_pn = rfc.mc_ack.full_ack();
+            if new_ack_pn.as_ref().is_some_and(|rs| rs.len() > 0) {
+                mc_ack.on_ack_received(new_ack_pn.as_ref().unwrap());
+
+                // Maybe now the flexicast flow can process packets.
+                if let Some(fully_acked) = mc_ack.full_ack() {
+                    fc_flow.fc_on_ack_received(&fully_acked, now)?;
+                }
+            }
+
+            // Notify for the pieces of stream that have been correctly received.
+            if let Some(mut ack_stream_pieces) = rfc.mc_ack.acked_stream_off() {
+                let mc_ack = fc_flow.get_mc_ack_mut().unwrap();
+                for (stream_id, ranges) in ack_stream_pieces.drain(..) {
+                    for range in ranges.iter() {
+                        mc_ack.on_stream_ack_received(
+                            stream_id,
+                            range.start,
+                            range.end - range.start,
+                        );
+                    }
+                }
+
+                // Maybe now we can also fully acknowledge some streams on the
+                // flexicast flow.
+                if let Some(mut fully_acked_stream_pieces) =
+                    mc_ack.acked_stream_off()
+                {
+                    for (stream_id, ranges) in fully_acked_stream_pieces.drain(..)
+                    {
+                        for range in ranges.iter() {
+                            fc_flow.fc_on_stream_ack_received(
+                                stream_id,
+                                range.start,
+                                range.end - range.start,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+
+        // The flexicast flow notifies the unicast path the packets that have been
+        // sent.
+        let _ = fc_flow.fc_notify_sent_packets(self);
+
         Ok(())
     }
 }
@@ -1115,9 +1229,36 @@ impl Connection {
     /// Returns whether flexicast is enabled and the path ID corresponds to the
     /// flexicast flow.
     pub fn is_flexicast_flow(&self, path_id: u64) -> bool {
-        self.flexicast.as_ref().is_some_and(|fc| {
-            fc.fc_path_id.is_some_and(|fcid| fcid == path_id)
-        })
+        self.flexicast
+            .as_ref()
+            .is_some_and(|fc| fc.fc_path_id.is_some_and(|fcid| fcid == path_id))
+    }
+
+    /// Returns the next packet number that will be sent on the flexicast flow.
+    fn fc_next_pn(&self) -> Option<u64> {
+        let fc_path_id =
+            self.flexicast.as_ref().map(|fc| fc.fc_path_id).flatten()?;
+
+        Some(
+            self.pkt_num_spaces
+                .spaces
+                .get(Epoch::Application, fc_path_id)
+                .ok()?
+                .next_pkt_num,
+        )
+    }
+
+    /// The flexicast flow notifies the unicast path the new packets sents.
+    fn fc_notify_sent_packets(&mut self, uc: &mut Connection) -> Result<()> {
+        let fca = fca!(uc)?;
+        let highest_pn = fca
+            .fc_reliable
+            .server()
+            .ok_or(Error::Flexicast(FcError::McReliableDisabled))?.fc_highest_pn;
+
+        let sent = self.fc_get_sent_pkt(highest_pn)?;
+        let fc_id = fc_chan_idx!(fca)?;
+        uc.fc_on_new_pkt_sent(fc_id, sent)
     }
 }
 
@@ -1304,7 +1445,7 @@ impl FlexicastChannelSource {
             .recv_pkt_need_ack = RangeSet::default();
 
         // Set state of the recovery receiver.
-        // conn_server.fc_set_recovery_state()?;
+        conn_server.fc_set_recovery_state()?;
 
         let cid = channel_id.clone().into_owned();
         Ok(Self {
@@ -2096,4 +2237,5 @@ mod tests {
 }
 
 pub mod ack;
+pub mod control;
 pub mod reliable;

@@ -245,6 +245,7 @@ mod tests {
                 tx_in_flight: 0,
                 lost: 0,
                 pmtud: false,
+                is_fc_delegated: false,
             };
 
             r.on_packet_sent(
@@ -312,6 +313,7 @@ mod tests {
                 tx_in_flight: 0,
                 lost: 0,
                 pmtud: false,
+                is_fc_delegated: false,
             };
 
             r.on_packet_sent(
@@ -354,6 +356,7 @@ mod tests {
                 tx_in_flight: 0,
                 lost: 0,
                 pmtud: false,
+                is_fc_delegated: false,
             };
 
             r.on_packet_sent(

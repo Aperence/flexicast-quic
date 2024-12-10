@@ -6,7 +6,6 @@
 use std::sync::Arc;
 use std::time;
 
-use super::ExpiredPkt;
 use super::FcError;
 use super::McRole;
 use crate::flexicast::ack::FcDelegatedStream;
@@ -22,42 +21,35 @@ use crate::Result;
 pub type OpenSent = Sent;
 
 impl Connection {
-    /// Sets the highest expired packet number sent on the flexicast flow.
-    pub fn fc_set_last_expired(&mut self, exp: Option<ExpiredPkt>) {
-        if let Some(mc) = self.flexicast.as_mut() {
-            mc.mc_last_expired = exp;
+    /// Sets the first packet number that the receiver must listen to.
+    pub fn fc_set_first_pn(&mut self, pn: Option<u64>) {
+        if let Some(fc) = self.flexicast.as_mut() {
+            fc.fc_first_pn = pn;
         }
     }
 
     /// Returns the packet numbers that have been sent on the flexicast flow and
-    /// that the client acknowledged. Also returns the stream ranges that
+    /// that the receiver acknowledged. Also returns the stream ranges that
     /// had been delegated on the unicast path and have been acknowledged by the
-    /// client. Returns an error if invalid role.
+    /// receiver. Returns an error if invalid role.
     ///
     /// Needs mutable.
     pub fn get_new_ack_pn_streams(
         &mut self,
     ) -> Result<(Option<RangeSet>, Option<McStreamOff>)> {
-        if let Some(mc) = self.flexicast.as_mut() {
-            if !matches!(mc.get_mc_role(), McRole::ServerUnicast(_)) {
+        if let Some(fc) = self.flexicast.as_mut() {
+            if !matches!(fc.get_mc_role(), McRole::ServerUnicast(_)) {
                 return Err(Error::Flexicast(FcError::McInvalidRole(
-                    mc.get_mc_role(),
+                    fc.get_mc_role(),
                 )));
             }
 
-            if let Some(rmc) = mc.rmc_get_mut().server_mut() {
+            if let Some(rfc) = fc.fc_reliable.server_mut() {
                 // Get newly acked packet numbers.
-                let new_ack_pn = if rmc.new_ack_pn_fc.len() > 0 {
-                    Some(rmc.new_ack_pn_fc.clone())
-                } else {
-                    None
-                };
-
-                // Reset the value on the receiver.
-                rmc.new_ack_pn_fc = RangeSet::default();
+                let new_ack_pn = rfc.mc_ack.full_ack();
 
                 // Get acked stream pieces.
-                let ack_stream_pieces = rmc.mc_ack.acked_stream_off();
+                let ack_stream_pieces = rfc.mc_ack.acked_stream_off();
 
                 return Ok((new_ack_pn, ack_stream_pieces));
             }
@@ -83,22 +75,17 @@ impl Connection {
             )));
         }
 
-        let space_id = flexicast
-            .mc_space_id
+        let fc_path_id = flexicast
+            .fc_path_id
             .ok_or(Error::Flexicast(FcError::McPath))?;
-        let max_pn = match from {
-            Some(v) => v,
-            None => flexicast.cur_max_pn,
-        };
+        let max_pn = from.unwrap_or(0);
 
-        let path = self.paths.get_mut(space_id);
+        let path = self.paths.get_mut(fc_path_id as usize);
         if let Ok(path) = path {
-            let (new_max_pn, sent) = path.recovery.fc_get_sent_pkt(
-                space_id as u32,
+            let (_new_max_pn, sent) = path.recovery.fc_get_sent_pkt(
                 Epoch::Application,
                 max_pn,
             );
-            flexicast.cur_max_pn = new_max_pn + 1;
             if sent.is_empty() {
                 return Err(Error::Done);
             }
@@ -113,7 +100,7 @@ impl Connection {
     /// flexicast flow. Only available for the unicast server instances if
     /// the flexicast index is the correct one.
     pub fn fc_on_new_pkt_sent(
-        &mut self, fc_id: u64, mut sent: Vec<Sent>,
+        &mut self, fc_id: usize, mut sent: Vec<Sent>,
     ) -> Result<()> {
         if self.flexicast.is_none() {
             return Err(Error::Flexicast(FcError::McDisabled));
@@ -126,30 +113,35 @@ impl Connection {
             )));
         }
 
-        let cur_max_pn = flexicast.cur_max_pn;
+        let frc = flexicast
+            .fc_reliable
+            .server_mut()
+            .ok_or(Error::Flexicast(FcError::McReliableDisabled))?;
 
-        // Update new max packet number.
+        let highest_pn = frc.fc_highest_pn;
+
+        // Update the new highest packet number.
         if let Some(sent) = sent.last() {
-            flexicast.cur_max_pn = sent.pkt_num + 1;
+            frc.fc_highest_pn = Some(sent.pkt_num + 1);
         }
 
         // Maybe during channel change we receive "old" sent packets. Avoid
         // putting them in our state.
         let joined_fc_id = flexicast.fc_chan_id.as_ref().map(|(_, id)| *id);
-        if joined_fc_id != Some(fc_id as usize) {
+        if joined_fc_id != Some(fc_id) {
             return Ok(());
         }
 
-        let space_id = flexicast
-            .get_mc_space_id()
+        let fc_path_id = flexicast
+            .get_fc_path_id()
             .ok_or(Error::Flexicast(FcError::McPath))?;
 
         let handshake_status = self.handshake_status();
         let trace_id = self.trace_id().to_string();
-        let path = self.paths.get_mut(space_id)?;
+        let path = self.paths.get_mut(fc_path_id as usize)?;
         let now = time::Instant::now();
 
-        for pkt in sent.drain(..).filter(|s| s.pkt_num >= cur_max_pn) {
+        for pkt in sent.drain(..).filter(|s| s.pkt_num >= highest_pn.unwrap_or(0)) {
             path.recovery.on_packet_sent(
                 pkt,
                 Epoch::Application,
@@ -175,11 +167,13 @@ impl Connection {
     /// if the frame needs to be retransmitted.
     ///
     /// FC-TODO: also breaks FEC.
-    /// 
+    ///
     /// The `early_retransmit` flag is set whenever the controller asks for
     /// the delegation of STREAM frames early in the process, i.e., frames that
     /// may not be lost will be delegated.
-    pub fn fc_get_delegated_stream(&mut self, early_retransmit: bool) -> Result<Vec<FcDelegatedStream>> {
+    pub fn fc_get_delegated_stream(
+        &mut self, early_retransmit: bool,
+    ) -> Result<Vec<FcDelegatedStream>> {
         if self.flexicast.is_none() {
             return Err(Error::Flexicast(FcError::McDisabled));
         }
@@ -191,15 +185,20 @@ impl Connection {
             )));
         }
 
-        let space_id = flexicast
-            .get_mc_space_id()
+        let fc_path_id = flexicast
+            .get_fc_path_id()
             .ok_or(Error::Flexicast(FcError::McPath))?;
-        let fc_path = self.paths.get_mut(space_id)?;
+        let fc_path = self.paths.get_mut(fc_path_id as usize)?;
 
         let streams = &mut self.streams;
-        fc_path
-            .recovery
-            .fc_get_delegated_stream(space_id as u32, streams, early_retransmit)
+        // fc_path.recovery.fc_get_delegated_stream(
+        //     fc_path_id as u32,
+        //     streams,
+        //     early_retransmit,
+        // )
+        todo!();
+
+        Ok(Vec::new())
     }
 
     /// Inserts in the unicast path delegated streams from the flexicast source.

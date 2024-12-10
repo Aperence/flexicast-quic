@@ -407,6 +407,7 @@ use qlog::events::EventImportance;
 use qlog::events::EventType;
 #[cfg(feature = "qlog")]
 use qlog::events::RawInfo;
+use recovery::flexicast::FcRecovery;
 use stream::StreamPriorityKey;
 
 use std::cmp;
@@ -3210,6 +3211,24 @@ impl Connection {
                             let local = stream.local;
                             self.streams.collect(stream_id, local);
                         }
+
+                        // Flexicast extension.
+                        // If the stream was sent through unicast retransmission
+                        // because the flexicast flow delegated it, we must
+                        // acknowledge the multicast ack aggregator that we
+                        // correctly transmitted it to the receiver.
+                        if let Some(rfc) = self
+                            .flexicast
+                            .as_mut()
+                            .map(|fc| fc.fc_reliable.server_mut())
+                            .flatten()
+                        {
+                            rfc.mc_ack.on_stream_ack_received(
+                                stream_id,
+                                offset,
+                                length as u64,
+                            );
+                        }
                     },
 
                     frame::Frame::HandshakeDone => {
@@ -3808,6 +3827,18 @@ impl Connection {
             self.use_path_pkt_num_space(epoch);
         // Process lost frames. There might be several paths having lost frames.
         for (_, p) in self.paths.iter_mut() {
+            // Flexicast.
+            // Do not retransmit lost frames that the unicast path is aware of and
+            // belong to the flexicast flow.
+            if let Some(flexicast) = self.flexicast.as_ref() {
+                if matches!(flexicast.get_mc_role(), McRole::ServerUnicast(_)) &&
+                    flexicast.get_fc_path_id() == Some(p.path_id())
+                {
+                    // Drain the lost frames to avoid retransmission.
+                    let _ = p.recovery.get_lost_frames(epoch);
+                    continue;
+                }
+            }
             for lost in p.recovery.get_lost_frames(epoch) {
                 match lost {
                     frame::Frame::CryptoHeader { offset, length } => {
@@ -3831,6 +3862,19 @@ impl Connection {
                         length,
                         fin,
                     } => {
+                        // Flexicast.
+                        // Currently do not retransmit lost STREAM frames on the
+                        // flexicast flow. Only use unicast retransmissions.
+                        if let Some(flexicast) = self.flexicast.as_ref() {
+                            if matches!(
+                                flexicast.get_mc_role(),
+                                McRole::ServerFlexicast
+                            ) {
+                                debug!("Flexicast flow does not retransmit lost STREAM frames");
+                                continue;
+                            }
+                        }
+
                         let stream = match self.streams.get_mut(stream_id) {
                             Some(v) => v,
 
@@ -4172,7 +4216,6 @@ impl Connection {
         }
 
         // Create PATH_ACK frames if needed.
-        println!("Is server={} before PATH_ACK", self.is_server);
         if multiple_application_data_pkt_num_spaces &&
             !is_closing &&
             path.active()
@@ -5334,6 +5377,7 @@ impl Connection {
             lost: 0,
             has_data,
             pmtud: pmtud_probe,
+            is_fc_delegated: false,
         };
 
         if in_flight && is_app_limited {
@@ -8531,10 +8575,6 @@ impl Connection {
                 ack_delay,
                 ..
             } => {
-                println!(
-                    "RECEIVE PathAck frame: {:?} and {}",
-                    ranges, path_identifier
-                );
                 if !self.use_path_pkt_num_space(epoch) {
                     return Err(Error::PathIdViolation);
                 }
@@ -8573,6 +8613,11 @@ impl Connection {
                     let is_app_limited =
                         self.delivery_rate_check_if_app_limited(path_id);
                     let p = self.paths.get_mut(path_id)?;
+
+                    if p.recovery.fc_recovery.is_none() {
+                        p.recovery.fc_recovery = Some(FcRecovery::new(false));
+                    }
+
                     if is_app_limited {
                         p.recovery.delivery_rate_update_app_limited(true);
                     }
@@ -8601,10 +8646,28 @@ impl Connection {
                 if self.is_flexicast_flow(path_identifier) {
                     // Safe unwrap because was true.
                     let flexicast = self.flexicast.as_mut().unwrap();
-                    
-                    // Sanity check: should be the unicast path.
-                    if let Some(rfc) = flexicast.fc_reliable.server_mut() {
-                        rfc.mc_ack.on_ack_received(&ranges);
+
+                    // Only get the newly acked.
+                    if let Some(pid) = self.paths.pid_from_path_id(path_identifier) {
+                        let p = self.paths.get_mut(pid)?;
+    
+                        if let Some(rfc) = p.recovery.fc_recovery.as_mut() {
+                            let pn_new_ack = rfc.fc_new_ack_pn.drain(..);
+                            let mut new_ack_rs = crate::ranges::RangeSet::default();
+                            for pn in pn_new_ack {
+                                new_ack_rs.insert(pn..pn + 1);
+                            }
+    
+                            // Sanity check: should be the unicast path.
+                            if let Some(rfc) = flexicast.fc_reliable.server_mut() {
+                                rfc.mc_ack.on_ack_received(&new_ack_rs);
+    
+                                // Also mark the packet as received in the range.
+                                for range in new_ack_rs.iter() {
+                                    rfc.fc_pn_recv.insert(range);
+                                }
+                            }
+                        }
                     }
                 }
             },
@@ -8841,7 +8904,7 @@ impl Connection {
                 channel_id: _,
                 key,
                 algo,
-                first_pn,
+                first_pn: _,
             } =>
                 if self.is_server {
                     return Err(Error::Flexicast(
