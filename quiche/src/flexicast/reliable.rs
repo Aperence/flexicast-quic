@@ -948,4 +948,122 @@ mod tests {
         let client = &fc_pipe.unicast_pipes[0].0.client;
         assert!(client.stream_readable(3));
     }
+
+    #[test]
+    /// Tests a flexicast channel where the flexicast flow always fails for the
+    /// first receiver. The other receivers use normal retransmissions to
+    /// recover the loss.
+    fn test_fc_quic_reliability_fcf_failing() {
+        let mut fc_config = FcConfig {
+            probe_mc_path: true,
+            ..Default::default()
+        };
+        let mut fc_pipe = FlexicastPipe::new(
+            3,
+            "/tmp/test_fc_quic_reliability_fcf_failing",
+            &mut fc_config,
+        )
+        .unwrap();
+
+        let sleep_duration = time::Duration::from_millis(2);
+        let now = time::Instant::now();
+
+        let mut client_loss = RangeSet::default();
+        client_loss.insert(0..1);
+        let mut client_loss2 = client_loss.clone();
+        client_loss2.insert(1..3);
+
+        // Sends three STREAM frame that is lost.
+        fc_pipe
+            .source_send_single_stream(true, Some(&client_loss), 3)
+            .unwrap();
+        fc_pipe
+            .source_send_single_stream(true, Some(&client_loss2), 7)
+            .unwrap();
+        for i in 2..6 {
+            fc_pipe
+                .source_send_single_stream(true, Some(&client_loss), 3 + i * 4)
+                .unwrap();
+        }
+        fc_pipe.server_control_to_mc_source(now).unwrap();
+
+        // Sleep to trigger timeout on the flexicast source.
+        std::thread::sleep(sleep_duration);
+        let _ = fc_pipe.mc_channel.channel.on_timeout();
+        fc_pipe.mc_channel.channel.send_ack_eliciting_on_path_with_path_id(1).unwrap();
+        let _ = fc_pipe.source_send_single(Some(&client_loss)).unwrap();
+
+        // The first receiver leaves for now listening to the flexicast content.
+        let mc_ack = fc_pipe.mc_channel.channel.get_mc_ack_mut().unwrap();
+        mc_ack.remove_recv();
+
+        std::thread::sleep(sleep_duration);
+        let now = time::Instant::now();
+
+        // The receiver received no packet.
+        let recv = &mut fc_pipe.unicast_pipes[0].0.client;
+        assert_eq!(recv.readable().next(), None);
+
+        // After some time, a flexicast flow scheduler fall-back to unicast
+        // delivery. Future packets will be distributed over unicast.
+        // However, we need to ensure that all STREAM frames that were distributed
+        // over the flexicast flow are now delegated to the unicast path.
+        let uc = &mut fc_pipe.unicast_pipes[0].0.server;
+        fc_pipe
+            .mc_channel
+            .channel
+            .rfc_delegate_streams(
+                uc,
+                now,
+                FcUnicastRetransmission::FullRetransmit,
+            )
+            .unwrap();
+        fc_pipe.unicast_pipes[0].0.advance().unwrap();
+
+        // Now, the receiver got all streams.
+        let recv = &mut fc_pipe.unicast_pipes[0].0.client;
+        for stream_id in 0..6 {
+            assert!(recv.stream_readable(3 + stream_id * 4));
+        }
+
+        // The second receiver uses now the retransmission.
+        let recv = &mut fc_pipe.unicast_pipes[1].0.client;
+        let mut readables = recv.readable().collect::<Vec<_>>();
+        readables.sort();
+        assert_eq!(readables, vec![3, 11, 15, 19, 23]);
+        fc_pipe.clients_send().unwrap();
+        fc_pipe.server_control_to_mc_source(now).unwrap();
+        let uc = &mut fc_pipe.unicast_pipes[1].0.server;
+        fc_pipe
+            .mc_channel
+            .channel
+            .rfc_delegate_streams(uc, now, FcUnicastRetransmission::Delegates(false))
+            .unwrap();
+
+        // The third receiver uses now the retransmission.
+        let recv = &mut fc_pipe.unicast_pipes[2].0.client;
+        let mut readables = recv.readable().collect::<Vec<_>>();
+        readables.sort();
+        assert_eq!(readables, vec![3, 11, 15, 19, 23]);
+        fc_pipe.clients_send().unwrap();
+        fc_pipe.server_control_to_mc_source(now).unwrap();
+        let uc = &mut fc_pipe.unicast_pipes[2].0.server;
+        fc_pipe
+            .mc_channel
+            .channel
+            .rfc_delegate_streams(uc, now, FcUnicastRetransmission::Delegates(true))
+            .unwrap();
+
+        fc_pipe.unicast_pipes[1].0.advance().unwrap();
+        let recv = &mut fc_pipe.unicast_pipes[1].0.client;
+        let mut readables = recv.readable().collect::<Vec<_>>();
+        readables.sort();
+        assert_eq!(readables, vec![3, 7, 11, 15, 19, 23]);
+
+        fc_pipe.unicast_pipes[2].0.advance().unwrap();
+        let recv = &mut fc_pipe.unicast_pipes[2].0.client;
+        let mut readables = recv.readable().collect::<Vec<_>>();
+        readables.sort();
+        assert_eq!(readables, vec![3, 7, 11, 15, 19, 23]);
+    }
 }

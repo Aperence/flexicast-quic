@@ -102,7 +102,7 @@ impl Recovery {
 
             // Indicate that this packet was delegated through unicast.
             // Only if we are sure that we can.
-            if !matches!(retr_kind, FcUnicastRetransmission::PerUcPath(_) | FcUnicastRetransmission::Delegates(false)) {
+            if matches!(retr_kind, FcUnicastRetransmission::Delegates(true)) {
                 packet.is_fc_delegated = true;
             }
 
