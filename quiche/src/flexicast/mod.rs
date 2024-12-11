@@ -1350,15 +1350,8 @@ impl FlexicastChannelSource {
         config_client: &mut Config, peer: SocketAddr, keylog_filename: &str,
         fc_config: &FcConfig,
     ) -> Result<Self> {
-        // if fc_config.mc_cwnd.is_some() {
-        //     config_client.cc_algorithm = CongestionControlAlgorithm::DISABLED;
-        //     config_server.cc_algorithm = CongestionControlAlgorithm::DISABLED;
-        // } else if !(config_client.cc_algorithm ==
-        //     CongestionControlAlgorithm::DISABLED &&
-        //     config_server.cc_algorithm == CongestionControlAlgorithm::DISABLED)
-        // {
-        //     return Err(Error::CongestionControl);
-        // }
+        config_client.cc_algorithm = CongestionControlAlgorithm::DISABLED;
+        config_server.cc_algorithm = CongestionControlAlgorithm::DISABLED;
 
         let mut scid = [0; 16];
         ring::rand::SystemRandom::new().fill(&mut scid[..]).unwrap();

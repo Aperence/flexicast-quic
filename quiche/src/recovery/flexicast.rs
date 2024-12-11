@@ -95,13 +95,14 @@ impl Recovery {
             });
 
         'per_packet: for packet in lost_iter {
-            trace!(
+            println!(
                 "Lost packet: {:?} with frames: {:?} and is lost={:?} is_acked={:?}", 
                 packet.pkt_num, packet.frames, packet.time_lost.is_some(), packet.time_acked.is_some(),
             );
 
             // Indicate that this packet was delegated through unicast.
-            if !matches!(retr_kind, FcUnicastRetransmission::PerUcPath(_)) {
+            // Only if we are sure that we can.
+            if !matches!(retr_kind, FcUnicastRetransmission::PerUcPath(_) | FcUnicastRetransmission::Delegates(false)) {
                 packet.is_fc_delegated = true;
             }
 
@@ -128,7 +129,7 @@ impl Recovery {
                     } => {
                         nb_lost_mc_stream_frames += 1;
 
-                        trace!("Lost STREAM frame: ID={:?}, offset={:?}, length={:?}, fin={:?}", stream_id, offset, length, fin);
+                        trace!("Lost STREAM frame: ID={:?}, offset={:?}, length={:?}, fin={:?} is_collected={:?} from pn={}", stream_id, offset, length, fin, local_streams.is_collected(*stream_id), packet.pkt_num);
 
                         // Get the stream on the flexicast flow.
                         let stream_fc = local_streams
@@ -167,7 +168,7 @@ impl Recovery {
 
                         // Notify the multicast acknowledgment aggregator that we
                         // delegate a piece of stream.
-                        if retr_kind == FcUnicastRetransmission::Delegates {
+                        if matches!(retr_kind, FcUnicastRetransmission::Delegates(_)) {
                             mc_ack.delegate(*stream_id, *offset, *length as u64);
                         }
 
@@ -199,7 +200,7 @@ impl Recovery {
                         // the stream was delegated since we entirely rely on
                         // unicast now (and the stream was
                         // not especially considered as lost for the source).
-                        if retr_kind == FcUnicastRetransmission::Delegates {
+                        if matches!(retr_kind, FcUnicastRetransmission::Delegates(_)) {
                             if let Some(rfc) =
                                 fca_mut!(uc)?.fc_reliable.server_mut()
                             {
@@ -221,13 +222,22 @@ impl Recovery {
         // flexicast flow. RFC-TODO: not optimal because we go over the
         // streams again. It should work by iterating over existing
         // finished streams were all data has already been sent. Not sure though.
-        let expired_sent = self.epochs[Epoch::Application]
+        let lost_iter = self.epochs[Epoch::Application]
             .sent_packets
-            .iter()
-            .take_while(|p| p.time_lost.is_some() || p.time_acked.is_some())
-            .filter(|p| p.time_lost.is_some());
+            .iter_mut()
+            .take_while(|p| {
+                p.time_lost.is_some() ||
+                    p.time_acked.is_some() ||
+                    retr_kind == FcUnicastRetransmission::FullRetransmit ||
+                    !recv_ack_rangeset.is_empty()
+            })
+            .filter(|p| {
+                p.time_lost.is_some() ||
+                    retr_kind == FcUnicastRetransmission::FullRetransmit ||
+                    recv_ack_rangeset.contains(&p.pkt_num)
+            });
 
-        for pkt in expired_sent {
+        for pkt in lost_iter {
             for frame in pkt.frames.iter() {
                 if let frame::Frame::StreamHeader {
                     stream_id,
@@ -256,12 +266,16 @@ impl Recovery {
                     }
                 }
             }
+
+            // Drain the frames of the packet if it is lost.
+            if matches!(retr_kind, FcUnicastRetransmission::Delegates(true)) {
+                let _ = pkt.frames.drain(..);
+            }
         }
 
         // Reset the packet numbers that have been received.
         fca_mut!(uc)?.fc_reliable.server_mut().unwrap().fc_pn_recv =
             RangeSet::default();
-
         Ok((nb_lost_mc_stream_frames, (lost_pn, recv_pn)))
     }
 

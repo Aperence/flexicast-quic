@@ -214,6 +214,7 @@ impl StreamMap {
                 }
 
                 if local != is_local(id, is_server) {
+                    println!("Again there is an error here... {local} vs {}", is_local(id, is_server));
                     return Err(Error::InvalidStreamState(id));
                 }
 

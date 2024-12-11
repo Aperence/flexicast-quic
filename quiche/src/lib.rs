@@ -9034,7 +9034,7 @@ impl Connection {
             .filter(|(_, p)| p.active())
             .map(|(_, p)| p.recovery.cwnd_available())
             .filter(|cwnd| *cwnd != usize::MAX)
-            .sum();
+            .fold(0_usize, |acc, v| acc.saturating_add(v));
         self.tx_cap = cmp::min(
             cwin_available,
             (self.max_tx_data - self.tx_data)

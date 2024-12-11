@@ -309,7 +309,7 @@ impl Connection {
         // Get the path on the unicast path.
         let pid = uc.paths.pid_from_path_id(path_id);
         if let Some(pid) = pid {
-            if let Ok(path) = self.paths.get_mut(pid) {
+            if let Ok(path) = uc.paths.get_mut(pid) {
                 path.recovery.set_largest_ack(highest_pn);
                 let _out = path.recovery.detect_lost_packets(
                     Epoch::Application,
@@ -327,7 +327,9 @@ impl Connection {
 pub enum FcUnicastRetransmission {
     /// The source retransmits reliable frames that it considers as lost after
     /// acknowledgment aggregation.
-    Delegates,
+    /// 
+    /// The boolean value indicates whether the flexicast flow can consider the packets delegated.
+    Delegates(bool),
 
     /// Full retransmit. Happens when the source falls back on unicast for some
     /// receiver.
@@ -349,13 +351,23 @@ pub mod testing {
         /// Same as `source_delegates_streams` but does not check for
         /// mc_timeout.
         pub fn source_delegates_streams_direct(
-            &mut self, expired: time::Instant, retr_kind: FcUnicastRetransmission,
+            &mut self, expired: time::Instant, mut retr_kind: FcUnicastRetransmission,
         ) -> Result<()> {
+            let nb_recv = self.unicast_pipes.len();
             let ucs = self.unicast_pipes.iter_mut().take_while(|_| true);
             let mc = &mut self.mc_channel.channel;
             let ucs = ucs.map(|c| &mut c.0.server);
 
-            ucs.map(|uc| mc.rfc_delegate_streams(uc, expired, retr_kind.clone()))
+            ucs.enumerate().map(|(idx, uc)| {
+                if matches!(retr_kind, FcUnicastRetransmission::Delegates(_)) {
+                    if idx < nb_recv - 1 {
+                        retr_kind = FcUnicastRetransmission::Delegates(false);
+                    } else {
+                        retr_kind = FcUnicastRetransmission::Delegates(true);
+                    }
+                }
+                mc.rfc_delegate_streams(uc, expired, retr_kind.clone())
+            })
                 .collect()
         }
     }
@@ -366,6 +378,7 @@ mod tests {
     use super::*;
     use crate::flexicast::testing::*;
     use crate::flexicast::FcConfig;
+    use crate::rand::rand_u8;
 
     impl FlexicastPipe {
         fn get_uc_path_mc_ack(&self, i: usize) -> Option<&McAck> {
@@ -538,7 +551,7 @@ mod tests {
             fc_pipe
                 .source_delegates_streams_direct(
                     now,
-                    FcUnicastRetransmission::Delegates,
+                    FcUnicastRetransmission::Delegates(true),
                 )
                 .unwrap();
 
@@ -608,6 +621,84 @@ mod tests {
             let client_0 = &mut fc_pipe.unicast_pipes[0].0.client;
             assert!(client_0.stream_readable(7));
             assert_eq!(client_0.stream_recv(7, &mut buf), Ok((300, true)));
+        }
+    }
+
+    #[test]
+    /// Tests the reliability mechanism of Flexicast QUIC with random packet
+    /// losses.
+    fn test_fc_quic_reliability_short_streams() {
+        let mut fc_config = FcConfig {
+            probe_mc_path: true,
+            ..Default::default()
+        };
+        let mut fc_pipe = FlexicastPipe::new(
+            2,
+            "/tmp/test_fc_quic_reliability_short_streams",
+            &mut fc_config,
+        )
+        .unwrap();
+
+        let sleep_duration = time::Duration::from_millis(2);
+
+        // Send multiple short streams that can lie in a single packet.
+        let nb_streams = 1000;
+        for i in 0..nb_streams {
+            // Generate random losses.
+            let mask = rand_u8();
+
+            // Do not generate losses for the last 2 streams to ensure that we see
+            // gaps.
+            let client_loss = if mask & 0b1 > 0 && i < nb_streams - 2 {
+                let mut losses = RangeSet::default();
+                for j in 1..4 {
+                    if mask & 1 << j > 0 {
+                        losses.insert(j - 1..j);
+                    }
+                }
+                Some(losses)
+            } else {
+                None
+            };
+
+            // The source sends the stream.
+            let now = time::Instant::now();
+            fc_pipe
+                .source_send_single_stream(true, client_loss.as_ref(), 3 + i * 4)
+                .unwrap();
+
+            // The source notifies the unicast instances of the sent packet.
+            fc_pipe.server_control_to_mc_source(now).unwrap();
+
+            // Wait a bit...
+            std::thread::sleep(sleep_duration);
+            let now = time::Instant::now();
+
+            // Clients send their feedback to the source.
+            fc_pipe.clients_send().unwrap();
+            fc_pipe.server_control_to_mc_source(now).unwrap();
+
+            // Stream deleguation.
+            fc_pipe
+                .source_delegates_streams_direct(
+                    now,
+                    FcUnicastRetransmission::Delegates(true),
+                )
+                .unwrap();
+
+            // Potentially unicast retransmissions.
+            fc_pipe
+                .unicast_pipes
+                .iter_mut()
+                .for_each(|(pipe, ..)| pipe.advance().unwrap());
+        }
+
+        // Ensure that each client received all the streams.
+        for (pipe, ..) in fc_pipe.unicast_pipes.iter_mut() {
+            let client = &mut pipe.client;
+            for i in 0..nb_streams {
+                assert!(client.stream_readable(3 + i * 4));
+            }
         }
     }
 }
