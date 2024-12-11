@@ -291,7 +291,14 @@ impl Connection {
             .ok_or(Error::Flexicast(FcError::McPath))?;
         let path = self.paths.get_mut(pid)?;
         let streams_fc = &mut self.streams;
-        let mc_ack = &mut self.flexicast.as_mut().unwrap().fc_reliable.source_mut().unwrap().mc_ack;
+        let mc_ack = &mut self
+            .flexicast
+            .as_mut()
+            .unwrap()
+            .fc_reliable
+            .source_mut()
+            .unwrap()
+            .mc_ack;
         let (_nb_lost_stream_frames, (lost_pn, recv_pn)) = path
             .recovery
             .delegate_streams(uc, streams_fc, mc_ack, retr_kind)?;
@@ -378,220 +385,229 @@ mod tests {
     /// Tests that the received packets are correctly forwarded to the receiver
     /// and lie in the ReliableFc structure.
     fn test_fc_reliable_ack() {
-        let mut fc_config = FcConfig {
-            probe_mc_path: true,
-            ..Default::default()
-        };
+        for probe_path in [false, true] {
+            let mut fc_config = FcConfig {
+                probe_mc_path: probe_path,
+                ..Default::default()
+            };
 
-        let mut fc_pipe =
-            FlexicastPipe::new(1, "/tmp/test_fc_reliable_ack", &mut fc_config)
-                .unwrap();
+            let mut fc_pipe = FlexicastPipe::new(
+                1,
+                "/tmp/test_fc_reliable_ack",
+                &mut fc_config,
+            )
+            .unwrap();
 
-        assert!(fc_pipe.source_send_single_stream(true, None, 3).is_ok());
-        assert!(fc_pipe.source_send_single_stream(true, None, 7).is_ok());
-        let now = time::Instant::now();
-        fc_pipe.server_control_to_mc_source(now).unwrap();
+            assert!(fc_pipe.source_send_single_stream(true, None, 3).is_ok());
+            assert!(fc_pipe.source_send_single_stream(true, None, 7).is_ok());
+            let now = time::Instant::now();
+            fc_pipe.server_control_to_mc_source(now).unwrap();
 
-        let mut readables = fc_pipe.unicast_pipes[0]
-            .0
-            .client
-            .readable()
-            .collect::<Vec<_>>();
-        readables.sort();
-        assert_eq!(readables, vec![3, 7]);
+            let mut readables = fc_pipe.unicast_pipes[0]
+                .0
+                .client
+                .readable()
+                .collect::<Vec<_>>();
+            readables.sort();
+            assert_eq!(readables, vec![3, 7]);
 
-        assert!(fc_pipe.clients_send().is_ok());
+            assert!(fc_pipe.clients_send().is_ok());
 
-        let mc_ack = fc_pipe.get_uc_path_mc_ack(0).unwrap();
-        let (_ack_pn, _streams, nb_recv) = mc_ack.get_state();
-        assert_eq!(nb_recv, 1);
-        let ack_pn = mc_ack.full_ack_poll().unwrap();
-        let mut expected_ack_pn = RangeSet::default();
-        expected_ack_pn.insert(2..4);
-        assert_eq!(ack_pn, &expected_ack_pn);
+            let mc_ack = fc_pipe.get_uc_path_mc_ack(0).unwrap();
+            let (_ack_pn, _streams, nb_recv) = mc_ack.get_state();
+            assert_eq!(nb_recv, 1);
+            let ack_pn = mc_ack.full_ack_poll().unwrap();
+            let mut expected_ack_pn = RangeSet::default();
+            expected_ack_pn.insert(2..4);
+            assert_eq!(ack_pn, &expected_ack_pn);
+        }
     }
 
     #[test]
     /// Tests the full reliability mechanism of flexicast using the McAck
     /// structure.
     fn test_fc_quic_reliability_with_mc_ack() {
-        let mut fc_config = FcConfig {
-            probe_mc_path: true,
-            ..Default::default()
-        };
-        let mut fc_pipe = FlexicastPipe::new(
-            2,
-            "/tmp/test_fc_quic_reliability_with_mc_ack",
-            &mut fc_config,
-        )
-        .unwrap();
-
-        let sleep_duration = time::Duration::from_millis(100);
-        let now = time::Instant::now();
-
-        // First stream is received by both receivers.
-        let mc_ack = fc_pipe.mc_channel.channel.get_mc_ack_mut().unwrap();
-        let (_, _, nb) = mc_ack.get_state();
-        assert_eq!(nb, 2);
-        fc_pipe.source_send_single_stream(true, None, 1).unwrap();
-        fc_pipe.server_control_to_mc_source(now).unwrap();
-
-        // The unicast paths have state for the new packets.
-        let uc = &mut fc_pipe.unicast_pipes[0].0.server;
-        let path = uc.paths.get(1).unwrap();
-        let sent_pkt = path.recovery.get_sent_pkts();
-        assert_eq!(sent_pkt[0].pkt_num, 2);
-
-        // Clients read the stream.
-        let mut buf = [0u8; 500];
-        let client_0 = &mut fc_pipe.unicast_pipes[0].0.client;
-        assert!(client_0.stream_readable(1));
-        assert_eq!(client_0.stream_recv(1, &mut buf), Ok((300, true)));
-        let client_1 = &mut fc_pipe.unicast_pipes[1].0.client;
-        assert!(client_1.stream_readable(1));
-        assert_eq!(client_1.stream_recv(1, &mut buf), Ok((300, true)));
-
-        // Flexicast source has a packet in waiting for ack.
-        let fc = &mut fc_pipe.mc_channel.channel;
-        let path = fc.paths.get(1).unwrap();
-        let sent_pkt = path.recovery.get_sent_pkts();
-        assert_eq!(sent_pkt[0].pkt_num, 1);
-        assert_eq!(sent_pkt[1].pkt_num, 2);
-        assert!(sent_pkt[1].time_acked.is_none());
-        let nb_ack = fc_pipe.mc_channel.channel.acked_bytes;
-
-        // The flexicast source acknowledged the packet because both receivers
-        // said it was ok.
-        std::thread::sleep(sleep_duration);
-        fc_pipe.mc_channel.channel.on_timeout();
-        let now = time::Instant::now();
-        fc_pipe.clients_send().unwrap();
-        fc_pipe.server_control_to_mc_source(now).unwrap();
-
-        // The flexicast flow and unicast path have acknowledged packets.
-        let fc = &mut fc_pipe.mc_channel.channel;
-        let path = fc.paths.get(1).unwrap();
-        let sent_pkt = path.recovery.get_sent_pkts();
-        assert!(sent_pkt[1].time_acked.is_some());
-
-        let uc = &mut fc_pipe.unicast_pipes[0].0.server;
-        let path = uc.paths.get(1).unwrap();
-        assert!(fc_pipe.mc_channel.channel.acked_bytes > nb_ack);
-
-        // McAck state is empty.
-        let mc_ack = fc_pipe.mc_channel.channel.get_mc_ack_mut().unwrap();
-        let (pns, ..) = mc_ack.get_state();
-        assert_eq!(pns.len(), 0);
-
-        // Second stream is lost for the first client.
-        let mut client_losses = RangeSet::default();
-        client_losses.insert(0..1);
-        fc_pipe
-            .source_send_single_stream(true, Some(&client_losses), 7)
-            .unwrap();
-        fc_pipe.server_control_to_mc_source(now).unwrap();
-
-        // Only second client receives data.
-        let client_0 = &mut fc_pipe.unicast_pipes[0].0.client;
-        assert!(!client_0.stream_readable(7));
-        let client_1 = &mut fc_pipe.unicast_pipes[1].0.client;
-        assert!(client_1.stream_readable(7));
-        assert_eq!(client_1.stream_recv(7, &mut buf), Ok((300, true)));
-
-        std::thread::sleep(sleep_duration);
-        fc_pipe.mc_channel.channel.on_timeout();
-        let now = time::Instant::now();
-        fc_pipe.clients_send().unwrap();
-        fc_pipe.server_control_to_mc_source(now).unwrap();
-
-        // No new complete acked packet.
-        assert!(fc_pipe.mc_channel.channel.acked_bytes > nb_ack);
-
-        // McAck contains state for this packet because it is not fully acked.
-        let mc_ack = fc_pipe.mc_channel.channel.get_mc_ack_mut().unwrap();
-        let (pns, streams, _) = mc_ack.get_state();
-        assert_eq!(pns.len(), 1);
-        assert_eq!(*pns.values().next().unwrap(), 1); // Only one client need to ack the packet.
-        assert_eq!(streams.len(), 0);
-
-        // The arrival of a new stream will trigger a loss for Stream 7.
-        let now = time::Instant::now();
-        fc_pipe.source_send_single_stream(true, None, 11).unwrap();
-        fc_pipe.server_control_to_mc_source(now).unwrap();
-        std::thread::sleep(sleep_duration);
-        let now = time::Instant::now();
-        fc_pipe.clients_send().unwrap();
-        fc_pipe.server_control_to_mc_source(now).unwrap();
-        fc_pipe
-            .source_delegates_streams_direct(
-                now,
-                FcUnicastRetransmission::Delegates,
+        for probe_path in [false] {
+            let mut fc_config = FcConfig {
+                probe_mc_path: probe_path,
+                ..Default::default()
+            };
+            let mut fc_pipe = FlexicastPipe::new(
+                2,
+                "/tmp/test_fc_quic_reliability_with_mc_ack",
+                &mut fc_config,
             )
             .unwrap();
 
-        // The unicast server now has state for the expired streams.
-        let open_stream_ids = fc_pipe.unicast_pipes[0]
-            .0
-            .server
-            .streams
-            .writable()
-            .collect::<Vec<_>>();
-        assert_eq!(open_stream_ids, vec![7]);
+            let sleep_duration = time::Duration::from_millis(100);
+            let now = time::Instant::now();
 
-        assert!(!fc_pipe.mc_channel.channel.streams.is_collected(7));
+            // First stream is received by both receivers.
+            let mc_ack = fc_pipe.mc_channel.channel.get_mc_ack_mut().unwrap();
+            let (_, _, nb) = mc_ack.get_state();
+            assert_eq!(nb, 2);
+            fc_pipe.source_send_single_stream(true, None, 1).unwrap();
+            fc_pipe.server_control_to_mc_source(now).unwrap();
 
-        // And the McAck of both the flexicast source and the unicast server have
-        // state.
-        let mc_ack = fc_pipe.mc_channel.channel.get_mc_ack_mut().unwrap();
-        let (_, streams, _) = mc_ack.get_state();
-        assert_eq!(streams.len(), 1);
-        let value = streams.get(&7).unwrap();
-        assert_eq!(value.len(), 1);
-        assert_eq!(value.iter().next().unwrap(), (&0, &(300, 1)));
+            // The unicast paths have state for the new packets.
+            let uc = &mut fc_pipe.unicast_pipes[0].0.server;
+            let path = uc.paths.get(1).unwrap();
+            let sent_pkt = path.recovery.get_sent_pkts();
+            assert_eq!(sent_pkt[0].pkt_num, 2);
 
-        let mc_ack = &fc_pipe.unicast_pipes[0]
-            .0
-            .server
-            .flexicast
-            .as_ref()
-            .unwrap()
-            .fc_reliable
-            .server()
-            .unwrap()
-            .mc_ack;
-        let (_, streams, _) = mc_ack.get_state();
-        assert_eq!(streams.len(), 1);
-        let value = streams.get(&7).unwrap();
-        assert_eq!(value.len(), 1);
-        assert_eq!(value.iter().next().unwrap(), (&0, &(300, 1)));
+            // Clients read the stream.
+            let mut buf = [0u8; 500];
+            let client_0 = &mut fc_pipe.unicast_pipes[0].0.client;
+            assert!(client_0.stream_readable(1));
+            assert_eq!(client_0.stream_recv(1, &mut buf), Ok((300, true)));
+            let client_1 = &mut fc_pipe.unicast_pipes[1].0.client;
+            assert!(client_1.stream_readable(1));
+            assert_eq!(client_1.stream_recv(1, &mut buf), Ok((300, true)));
 
-        fc_pipe.unicast_pipes[0].0.advance().unwrap();
+            // Flexicast source has a packet in waiting for ack.
+            let fc = &mut fc_pipe.mc_channel.channel;
+            let path = fc.paths.get(1).unwrap();
+            let sent_pkt = path.recovery.get_sent_pkts();
+            assert_eq!(sent_pkt[0].pkt_num, 1);
+            assert_eq!(sent_pkt[1].pkt_num, 2);
+            assert!(sent_pkt[1].time_acked.is_none());
+            let nb_ack = fc_pipe.mc_channel.channel.acked_bytes;
 
-        // Client received the stream. State updated on the McAck of the server.
-        let mc_ack = &fc_pipe.unicast_pipes[0]
-            .0
-            .server
-            .flexicast
-            .as_ref()
-            .unwrap()
-            .fc_reliable
-            .server()
-            .unwrap()
-            .mc_ack;
-        let (_, streams, _) = mc_ack.get_state();
-        assert!(streams.is_empty());
+            // The flexicast source acknowledged the packet because both receivers
+            // said it was ok.
+            std::thread::sleep(sleep_duration);
+            fc_pipe.mc_channel.channel.on_timeout();
+            let now = time::Instant::now();
+            fc_pipe.clients_send().unwrap();
+            fc_pipe.server_control_to_mc_source(now).unwrap();
 
-        fc_pipe.server_control_to_mc_source(now).unwrap();
+            // The flexicast flow and unicast path have acknowledged packets.
+            let fc = &mut fc_pipe.mc_channel.channel;
+            let path = fc.paths.get(1).unwrap();
+            let sent_pkt = path.recovery.get_sent_pkts();
+            assert!(sent_pkt[1].time_acked.is_some());
 
-        // Now the flexicast source does not have any state for the open stream.
-        let mc_ack = fc_pipe.mc_channel.channel.get_mc_ack_mut().unwrap();
-        let (_, streams, _) = mc_ack.get_state();
-        assert!(streams.is_empty());
-        assert!(fc_pipe.mc_channel.channel.streams.is_collected(7));
+            let uc = &mut fc_pipe.unicast_pipes[0].0.server;
+            let path = uc.paths.get(1).unwrap();
+            assert!(fc_pipe.mc_channel.channel.acked_bytes > nb_ack);
 
-        // First client now has the second stream.
-        let client_0 = &mut fc_pipe.unicast_pipes[0].0.client;
-        assert!(client_0.stream_readable(7));
-        assert_eq!(client_0.stream_recv(7, &mut buf), Ok((300, true)));
+            // McAck state is empty.
+            let mc_ack = fc_pipe.mc_channel.channel.get_mc_ack_mut().unwrap();
+            let (pns, ..) = mc_ack.get_state();
+            assert_eq!(pns.len(), 0);
+
+            // Second stream is lost for the first client.
+            let mut client_losses = RangeSet::default();
+            client_losses.insert(0..1);
+            fc_pipe
+                .source_send_single_stream(true, Some(&client_losses), 7)
+                .unwrap();
+            fc_pipe.server_control_to_mc_source(now).unwrap();
+
+            // Only second client receives data.
+            let client_0 = &mut fc_pipe.unicast_pipes[0].0.client;
+            assert!(!client_0.stream_readable(7));
+            let client_1 = &mut fc_pipe.unicast_pipes[1].0.client;
+            assert!(client_1.stream_readable(7));
+            assert_eq!(client_1.stream_recv(7, &mut buf), Ok((300, true)));
+
+            std::thread::sleep(sleep_duration);
+            fc_pipe.mc_channel.channel.on_timeout();
+            let now = time::Instant::now();
+            fc_pipe.clients_send().unwrap();
+            fc_pipe.server_control_to_mc_source(now).unwrap();
+
+            // No new complete acked packet.
+            assert!(fc_pipe.mc_channel.channel.acked_bytes > nb_ack);
+
+            // McAck contains state for this packet because it is not fully acked.
+            let mc_ack = fc_pipe.mc_channel.channel.get_mc_ack_mut().unwrap();
+            let (pns, streams, _) = mc_ack.get_state();
+            assert_eq!(pns.len(), 1);
+            assert_eq!(*pns.values().next().unwrap(), 1); // Only one client need to ack the packet.
+            assert_eq!(streams.len(), 0);
+
+            // The arrival of a new stream will trigger a loss for Stream 7.
+            let now = time::Instant::now();
+            fc_pipe.source_send_single_stream(true, None, 11).unwrap();
+            fc_pipe.server_control_to_mc_source(now).unwrap();
+            std::thread::sleep(sleep_duration);
+            let now = time::Instant::now();
+            fc_pipe.clients_send().unwrap();
+            fc_pipe.server_control_to_mc_source(now).unwrap();
+            fc_pipe
+                .source_delegates_streams_direct(
+                    now,
+                    FcUnicastRetransmission::Delegates,
+                )
+                .unwrap();
+
+            // The unicast server now has state for the expired streams.
+            let open_stream_ids = fc_pipe.unicast_pipes[0]
+                .0
+                .server
+                .streams
+                .writable()
+                .collect::<Vec<_>>();
+            assert_eq!(open_stream_ids, vec![7]);
+
+            assert!(!fc_pipe.mc_channel.channel.streams.is_collected(7));
+
+            // And the McAck of both the flexicast source and the unicast server
+            // have state.
+            let mc_ack = fc_pipe.mc_channel.channel.get_mc_ack_mut().unwrap();
+            let (_, streams, _) = mc_ack.get_state();
+            assert_eq!(streams.len(), 1);
+            let value = streams.get(&7).unwrap();
+            assert_eq!(value.len(), 1);
+            assert_eq!(value.iter().next().unwrap(), (&0, &(300, 1)));
+
+            let mc_ack = &fc_pipe.unicast_pipes[0]
+                .0
+                .server
+                .flexicast
+                .as_ref()
+                .unwrap()
+                .fc_reliable
+                .server()
+                .unwrap()
+                .mc_ack;
+            let (_, streams, _) = mc_ack.get_state();
+            assert_eq!(streams.len(), 1);
+            let value = streams.get(&7).unwrap();
+            assert_eq!(value.len(), 1);
+            assert_eq!(value.iter().next().unwrap(), (&0, &(300, 1)));
+
+            fc_pipe.unicast_pipes[0].0.advance().unwrap();
+
+            // Client received the stream. State updated on the McAck of the
+            // server.
+            let mc_ack = &fc_pipe.unicast_pipes[0]
+                .0
+                .server
+                .flexicast
+                .as_ref()
+                .unwrap()
+                .fc_reliable
+                .server()
+                .unwrap()
+                .mc_ack;
+            let (_, streams, _) = mc_ack.get_state();
+            assert!(streams.is_empty());
+
+            fc_pipe.server_control_to_mc_source(now).unwrap();
+
+            // Now the flexicast source does not have any state for the open
+            // stream.
+            let mc_ack = fc_pipe.mc_channel.channel.get_mc_ack_mut().unwrap();
+            let (_, streams, _) = mc_ack.get_state();
+            assert!(streams.is_empty());
+            assert!(fc_pipe.mc_channel.channel.streams.is_collected(7));
+
+            // First client now has the second stream.
+            let client_0 = &mut fc_pipe.unicast_pipes[0].0.client;
+            assert!(client_0.stream_readable(7));
+            assert_eq!(client_0.stream_recv(7, &mut buf), Ok((300, true)));
+        }
     }
 }

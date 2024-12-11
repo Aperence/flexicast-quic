@@ -142,7 +142,9 @@ impl Recovery {
                         {
                             Ok(v) => v,
                             Err(Error::Done) if is_collected_on_uc => continue,
-                            Err(e) => return Err(e),
+                            Err(e) => {
+                                return Err(e);
+                            },
                         };
                         let was_flushable_uc = stream_uc.is_flushable();
 

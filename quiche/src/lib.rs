@@ -8904,7 +8904,7 @@ impl Connection {
                 channel_id: _,
                 key,
                 algo,
-                first_pn: _,
+                first_pn,
             } =>
                 if self.is_server {
                     return Err(Error::Flexicast(
@@ -8926,7 +8926,7 @@ impl Connection {
                         self.pkt_num_spaces.spaces.get_mut_or_create(
                             packet::Epoch::Application,
                             mc_space_id as u64,
-                        );
+                        ).recv_pkt_need_ack.insert(first_pn..first_pn + 1);
                     }
                 } else {
                     return Err(Error::Flexicast(

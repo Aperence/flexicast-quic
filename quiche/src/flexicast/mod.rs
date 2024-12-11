@@ -1104,21 +1104,30 @@ impl FlexicastConnection for Connection {
                     return Err(e);
                 },
             };
-            let pid = match path.active_dcid_seq.ok_or(Error::InvalidState) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.is_server = was_server;
-                    return Err(e);
-                },
-            };
+
             self.is_server = was_server;
 
-            Ok(pid)
+            Ok(path.path_id())
         }?;
 
         let pid = self.paths.pid_from_path_id(path_id).unwrap();
         let path = self.paths.get_mut(pid)?;
         path.recovery.fc_recovery = Some(FcRecovery::new(false));
+
+        // Add the first packet number of interest for the new path if possible.
+        if let Some(flexicast) = self.flexicast.as_ref() {
+            if let Some(pn) = flexicast
+                .fc_reliable
+                .server()
+                .map(|rfc| rfc.fc_highest_pn.unwrap_or(0))
+            {
+                self.pkt_num_spaces
+                    .spaces
+                    .get_mut_or_create(Epoch::Application, path_id)
+                    .recv_pkt_need_ack
+                    .insert(pn..pn + 1);
+            }
+        }
 
         Ok(path_id)
     }
@@ -1158,7 +1167,7 @@ impl FlexicastConnection for Connection {
             if let Some(rfc_source) = fc_flow.get_mc_ack_mut() {
                 if !rfc.notified_fc_source {
                     rfc_source.new_recv(fc_flow_next_pn.unwrap_or(0));
-    
+
                     rfc.notified_fc_source = true;
                 }
             }
@@ -1254,7 +1263,8 @@ impl Connection {
         let highest_pn = fca
             .fc_reliable
             .server()
-            .ok_or(Error::Flexicast(FcError::McReliableDisabled))?.fc_highest_pn;
+            .ok_or(Error::Flexicast(FcError::McReliableDisabled))?
+            .fc_highest_pn;
 
         let sent = self.fc_get_sent_pkt(highest_pn)?;
         let fc_id = fc_chan_idx!(fca)?;
@@ -1645,6 +1655,11 @@ pub mod testing {
         pub fn new(
             nb_clients: usize, keylog_filename: &str, fc_config: &mut FcConfig,
         ) -> Result<FlexicastPipe> {
+            let probe_mc_path = fc_config.probe_mc_path;
+            fc_config
+                .mc_announce_data
+                .iter_mut()
+                .for_each(|ad| ad.probe_path = probe_mc_path);
             Self::new_from_mc_announce_data(
                 nb_clients,
                 keylog_filename,
@@ -1657,7 +1672,7 @@ pub mod testing {
         pub fn new_from_mc_announce_data(
             nb_clients: usize, keylog_filename: &str, fc_config: &mut FcConfig,
         ) -> Result<FlexicastPipe> {
-            let mut client_config = get_test_mc_config(false, fc_config);
+            let mut client_config = get_test_mc_config(true, fc_config);
             let mut server_config = get_test_mc_config(true, fc_config);
 
             // Flexicast path.
