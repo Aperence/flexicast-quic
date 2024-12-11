@@ -701,4 +701,75 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    /// Tests the reliability mechanism with a single sent stream and relying on
+    /// the timeout of the server.
+    fn test_fc_quic_reliability_timeout() {
+        let mut fc_config = FcConfig {
+            probe_mc_path: true,
+            ..Default::default()
+        };
+        let mut fc_pipe = FlexicastPipe::new(
+            1,
+            "/tmp/test_fc_quic_reliability_timeout",
+            &mut fc_config,
+        )
+        .unwrap();
+
+        let sleep_duration = time::Duration::from_millis(2);
+
+        let mut client_loss = RangeSet::default();
+        client_loss.insert(0..1);
+
+        fc_pipe
+            .source_send_single_stream(true, Some(&client_loss), 3)
+            .unwrap();
+
+        // Looping until we receive the packet. Set a "timeout" to ensure that we
+        // don't loop for ever.
+        for _ in 0..5 {
+            // Timeout of the flexicast source.
+            let now = time::Instant::now();
+            let _ = fc_pipe.mc_channel.channel.on_timeout();
+            fc_pipe.mc_channel.channel.send_ack_eliciting_on_path_with_path_id(1).unwrap();
+
+            // Allow the flexicast source to send more packets, e.g., ping frames.
+            let _ = fc_pipe.source_send_single(None);
+
+            // The source notifies the unicast instances of the sent packet.
+            fc_pipe.server_control_to_mc_source(now).unwrap();
+
+            // Wait a bit...
+            std::thread::sleep(sleep_duration);
+            let now = time::Instant::now();
+
+            // Clients send their feedback to the source.
+            fc_pipe.clients_send().unwrap();
+            fc_pipe.server_control_to_mc_source(now).unwrap();
+
+            // Stream deleguation.
+            fc_pipe
+                .source_delegates_streams_direct(
+                    now,
+                    FcUnicastRetransmission::Delegates(true),
+                )
+                .unwrap();
+
+            // Potentially unicast retransmissions.
+            fc_pipe
+                .unicast_pipes
+                .iter_mut()
+                .for_each(|(pipe, ..)| pipe.advance().unwrap());
+
+            // Test if the stream is readable.
+            let client = &fc_pipe.unicast_pipes[0].0.client;
+            if client.stream_readable(3) {
+                return; // Ok.
+            }
+        }
+
+        let client = &fc_pipe.unicast_pipes[0].0.client;
+        assert!(client.stream_readable(3));
+    }
 }

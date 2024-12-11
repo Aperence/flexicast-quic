@@ -6292,6 +6292,27 @@ impl Connection {
         Ok(())
     }
 
+    /// Schedule an ack-eliciting packet on the specified path using the path ID.
+    ///
+    /// See [`send_ack_eliciting()`] for more detail. [`InvalidState`] is
+    /// returned if there is no record of the path.
+    ///
+    /// [`send_ack_eliciting()`]: struct.Connection.html#method.send_ack_eliciting
+    /// [`InvalidState`]: enum.Error.html#variant.InvalidState
+    pub fn send_ack_eliciting_on_path_with_path_id(
+        &mut self, path_id: u64,
+    ) -> Result<()> {
+        if self.is_closed() || self.is_draining() {
+            return Ok(());
+        }
+        let path_id = self
+            .paths
+            .pid_from_path_id(path_id)
+            .ok_or(Error::InvalidState)?;
+        self.paths.get_mut(path_id)?.needs_ack_eliciting = true;
+        Ok(())
+    }
+
     /// Reads the first received DATAGRAM.
     ///
     /// On success the DATAGRAM's data is returned along with its size.
