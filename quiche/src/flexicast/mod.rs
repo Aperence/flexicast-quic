@@ -10,16 +10,13 @@ use crate::packet::Epoch;
 use crate::rand::rand_bytes;
 use crate::ranges;
 use crate::ranges::RangeSet;
-use crate::recovery::flexicast::FcRecovery;
 use crate::CongestionControlAlgorithm;
 use crate::SendInfo;
 use reliable::RFcRecv;
 use reliable::RFcSource;
 use reliable::RFcUcPath;
 use reliable::ReliableFc;
-use ring::rand;
 use ring::rand::SecureRandom;
-use ring::signature;
 
 use crate::accept;
 use crate::connect;
@@ -341,7 +338,7 @@ pub struct FlexicastAttributes {
     /// Whether the receiver must do explicit PATH_ACK acknowledgment.
     /// Concretelly, it will make PATH_ACK frames for the flexicast flow ack
     /// eliciting by adding a PING frame.
-    pub(crate) fc_make_ack_elicit: bool,
+    pub(crate) _fc_make_ack_elicit: bool,
 
     /// Structure handling the reliability between the flexicast flow and the
     /// unicast paths.
@@ -683,7 +680,7 @@ impl Default for FlexicastAttributes {
             mc_client_left_need_sync: false,
             mc_state_in_flight: false,
             fc_chan_id: None,
-            fc_make_ack_elicit: false,
+            _fc_make_ack_elicit: false,
             fc_first_pn: None,
             fc_reliable: ReliableFc::Undefined,
         }
@@ -1115,7 +1112,8 @@ impl FlexicastConnection for Connection {
 
         // Add the first packet number of interest for the new path if possible.
         if let Some(flexicast) = self.flexicast.as_ref() {
-            path.recovery.init_fc_recovery_state(flexicast.get_mc_role());
+            path.recovery
+                .init_fc_recovery_state(flexicast.get_mc_role());
             if let Some(pn) = flexicast
                 .fc_reliable
                 .server()
@@ -1229,6 +1227,10 @@ impl FlexicastConnection for Connection {
         // The flexicast flow notifies the unicast path the packets that have been
         // sent.
         let _ = fc_flow.fc_notify_sent_packets(self);
+
+        // The unicast path asks the flexicast flow if some streams have a fin offset.
+        // This happens when the flexicast flow collected some streams.
+        fc_flow.fc_notify_collected_streams(self);
 
         Ok(())
     }
@@ -1348,7 +1350,7 @@ impl FlexicastChannelSource {
     pub fn new_with_tls(
         mc_path_info: McPathInfo, config_server: &mut Config,
         config_client: &mut Config, peer: SocketAddr, keylog_filename: &str,
-        fc_config: &FcConfig,
+        _fc_config: &FcConfig,
     ) -> Result<Self> {
         config_client.cc_algorithm = CongestionControlAlgorithm::DISABLED;
         config_server.cc_algorithm = CongestionControlAlgorithm::DISABLED;
@@ -1409,13 +1411,13 @@ impl FlexicastChannelSource {
             .paths
             .path_id_from_addrs(&(mc_path_info.local, mc_path_info.peer))
             .expect("no such path");
-        let mc_path_client = conn_client.paths.get_mut(pid_c2s_1)?;
+        let _mc_path_client = conn_client.paths.get_mut(pid_c2s_1)?;
         Self::advance(&mut conn_server, &mut conn_client)?;
         let pid_s2c_1 = conn_server
             .paths
             .path_id_from_addrs(&(mc_path_info.peer, mc_path_info.local))
             .expect("no such path");
-        let mc_path_server = conn_server.paths.get_mut(pid_s2c_1)?;
+        let _mc_path_server = conn_server.paths.get_mut(pid_s2c_1)?;
 
         conn_server.flexicast.as_mut().unwrap().fc_path_id =
             Some(pid_s2c_1 as u64);
@@ -1534,20 +1536,6 @@ impl FlexicastChannelSource {
                     .ok_or(Error::Flexicast(FcError::McInvalidSymKey))
             })
             .collect()
-    }
-
-    /// Computes a new asymetric key pair.
-    fn compute_asymetric_signature_keys() -> Result<signature::Ed25519KeyPair> {
-        let rng = rand::SystemRandom::new();
-        let pkcs8_bytes = signature::Ed25519KeyPair::generate_pkcs8(&rng)
-            .map_err(|_| crate::Error::Flexicast(FcError::McInvalidAsymKey))?;
-
-        let key_pair = signature::Ed25519KeyPair::from_pkcs8(
-            pkcs8_bytes.as_ref(),
-        )
-        .map_err(|_| crate::Error::Flexicast(FcError::McInvalidAsymKey))?;
-
-        Ok(key_pair)
     }
 
     /// Flexicast-version of the [`send`] method of the crate.

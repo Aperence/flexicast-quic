@@ -407,7 +407,6 @@ use qlog::events::EventImportance;
 use qlog::events::EventType;
 #[cfg(feature = "qlog")]
 use qlog::events::RawInfo;
-use recovery::flexicast::FcRecovery;
 use stream::StreamPriorityKey;
 
 use std::cmp;

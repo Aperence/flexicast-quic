@@ -6,6 +6,7 @@
 use std::sync::Arc;
 use std::time;
 
+use super::reliable::FcUnicastRetransmission;
 use super::FcError;
 use super::McRole;
 use crate::flexicast::ack::FcDelegatedStream;
@@ -82,10 +83,8 @@ impl Connection {
 
         let path = self.paths.get_mut(fc_path_id as usize);
         if let Ok(path) = path {
-            let (_new_max_pn, sent) = path.recovery.fc_get_sent_pkt(
-                Epoch::Application,
-                max_pn,
-            );
+            let (_new_max_pn, sent) =
+                path.recovery.fc_get_sent_pkt(Epoch::Application, max_pn);
             if sent.is_empty() {
                 return Err(Error::Done);
             }
@@ -141,7 +140,11 @@ impl Connection {
         let path = self.paths.get_mut(fc_path_id as usize)?;
         let now = time::Instant::now();
 
-        for pkt in sent.drain(..).filter(|s| s.pkt_num >= highest_pn.unwrap_or(0)) {
+        for pkt in sent
+            .drain(..)
+            .filter(|s| s.pkt_num >= highest_pn.unwrap_or(0))
+        {
+            // Acknowledge the packet.
             path.recovery.on_packet_sent(
                 pkt,
                 Epoch::Application,
@@ -172,7 +175,7 @@ impl Connection {
     /// the delegation of STREAM frames early in the process, i.e., frames that
     /// may not be lost will be delegated.
     pub fn fc_get_delegated_stream(
-        &mut self, early_retransmit: bool,
+        &mut self, retr_kind: FcUnicastRetransmission,
     ) -> Result<Vec<FcDelegatedStream>> {
         if self.flexicast.is_none() {
             return Err(Error::Flexicast(FcError::McDisabled));
@@ -191,14 +194,7 @@ impl Connection {
         let fc_path = self.paths.get_mut(fc_path_id as usize)?;
 
         let streams = &mut self.streams;
-        // fc_path.recovery.fc_get_delegated_stream(
-        //     fc_path_id as u32,
-        //     streams,
-        //     early_retransmit,
-        // )
-        todo!();
-
-        Ok(Vec::new())
+        fc_path.recovery.fc_get_delegated_stream(streams, retr_kind)
     }
 
     /// Inserts in the unicast path delegated streams from the flexicast source.
@@ -270,5 +266,26 @@ impl Connection {
         }
 
         Ok(())
+    }
+
+    /// Notifies the unicast path that some streams have been collected on the flexicast flow.
+    /// If this happens, the unicast path knows that it will not receive new unicast retransmissions
+    /// and it can collect its stream once all data is acknowledged.
+    pub fn fc_notify_collected_streams(&self, uc: &mut Connection) {
+        let stream_ids = uc.streams.fc_get_stream_ids().map(|id| *id).collect::<Vec<_>>();
+        for &stream_id in stream_ids.iter() {
+            if self.streams.is_collected(stream_id) {
+                if let Some(stream) = uc.streams.get_mut(stream_id) {
+                    stream.send.fc_set_close_offset();
+                    
+                    // Maybe the stream is now complete.
+                    if stream.is_complete() && !stream.is_readable()
+                    {
+                        let local = stream.local;
+                        uc.streams.collect(stream_id, local);
+                    }
+                }
+            }
+        }
     }
 }

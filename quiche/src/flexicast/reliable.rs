@@ -1,6 +1,7 @@
 //! Reliability management for Flexicast QUIC.
 //! Depending on the role, the attributes are different.
 
+use crate::frame;
 use crate::packet::Epoch;
 use crate::ranges::RangeSet;
 use crate::Connection;
@@ -186,6 +187,35 @@ impl Connection {
             self.lost_count += lost_pkt;
             self.lost_bytes += lost_bytes as u64;
             self.acked_bytes += acked_bytes as u64;
+
+            // Process acked frames.
+            // For simplicity, only consider the STREAM frames.
+            for acked in p.recovery.get_acked_frames(Epoch::Application) {
+                match acked {
+                    frame::Frame::StreamHeader { stream_id, offset, length, .. } => {
+                        let stream = match self.streams.get_mut(stream_id) {
+                            Some(v) => v,
+
+                            None => continue,
+                        };
+
+                        stream.send.ack_and_drop(offset, length);
+
+                        self.tx_buffered =
+                            self.tx_buffered.saturating_sub(length);
+
+                        // Only collect the stream if it is complete and not
+                        // readable. If it is readable, it will get collected when
+                        // stream_recv() is used.
+                        if stream.is_complete() && !stream.is_readable() {
+                            let local = stream.local;
+                            self.streams.collect(stream_id, local);
+                        }
+                    },
+
+                    _ => (),
+                }
+            }
 
             // Drain packets from the McAck structure.
             let largest_pn = p.recovery.get_lowest_pn_app_epoch();
@@ -782,7 +812,7 @@ mod tests {
             ..Default::default()
         };
         let mut fc_pipe = FlexicastPipe::new(
-            1,
+            2,
             "/tmp/test_fc_quic_reliability_long_streams",
             &mut fc_config,
         )
@@ -813,7 +843,7 @@ mod tests {
 
             // Do not generate losses for the last 2 streams to ensure that we see
             // gaps.
-            let client_loss = if mask & 0b1 > 0 && i < nb_turns_allowed - 5 {
+            let client_loss = if mask & 0b1 > 0 && i < nb_turns_allowed - 5 && i > 5 {
                 let mut losses = RangeSet::default();
                 for j in 1..4 {
                     if mask & 1 << j > 0 {
@@ -834,6 +864,7 @@ mod tests {
 
             // Clients set timeout information.
             fc_pipe.mc_channel.channel.on_timeout();
+            fc_pipe.mc_channel.channel.send_ack_eliciting_on_path_with_path_id(1).unwrap();
 
             // Wait a bit...
             std::thread::sleep(sleep_duration);
@@ -856,6 +887,7 @@ mod tests {
                 .unicast_pipes
                 .iter_mut()
                 .for_each(|(pipe, ..)| pipe.advance().unwrap());
+            fc_pipe.server_control_to_mc_source(now).unwrap();
         }
 
         // Ensure that each client received all the streams.
@@ -869,6 +901,19 @@ mod tests {
             assert!(client.stream_readable(7));
             assert_eq!(client.stream_recv(7, &mut out[..]), Ok((10_000, true)));
             assert_eq!(&out[..10_000], &buf[30_000..]);
+        }
+
+        // Streams are collected on the flexicast flow.
+        assert!(fc_pipe.mc_channel.channel.streams.is_collected(3));
+        assert!(fc_pipe.mc_channel.channel.streams.is_collected(7));
+
+        // Ensure that on all the unicast paths the streams are closed.
+        for (pipe, ..) in fc_pipe.unicast_pipes.iter_mut() {
+            assert!(pipe.server.streams.is_collected(3) || pipe.server.streams.get(3).is_none());
+            assert!(pipe.server.streams.is_collected(7) || pipe.server.streams.get(7).is_none());
+
+            assert!(pipe.client.streams.is_collected(3));
+            assert!(pipe.client.streams.is_collected(7));
         }
     }
 

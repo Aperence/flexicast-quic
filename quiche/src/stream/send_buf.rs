@@ -512,7 +512,13 @@ impl SendBuf {
         }
 
         if let Some(fc_fin_off) = self.fc_max_offset {
-            if self.acked == (0..fc_fin_off) {
+            // The receiver might have acknowledged more piece of data than required because I don't know.
+            // FC-TODO: check why this case might happen: self.acked = [0..7860, 9171..9999] while we sent [0..7860].
+            let mut acked = self.acked.clone();
+
+            // We fully received this portion of data if the structure does not change.
+            acked.insert(0..fc_fin_off);
+            if self.acked == acked {
                 return true && fc_rotation_is_complete;
             }
         }

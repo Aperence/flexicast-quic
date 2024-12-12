@@ -70,6 +70,11 @@ impl StreamMap {
             })
             .collect()
     }
+
+    /// Returns the set of open streams IDs.
+    pub(crate) fn fc_get_stream_ids(&self) -> impl Iterator<Item = &u64> {
+        self.streams.keys()
+    }
 }
 
 impl Stream {
