@@ -96,6 +96,10 @@ struct RecoveryEpoch {
     /// Flexicast.
     /// Whether this recovery epoch belongs to the flexicast flow.
     is_fc_source: bool,
+
+    /// Flexicast.
+    /// New lost packets.
+    fc_new_lost_pkt: Option<Vec<u64>>,
 }
 
 struct AckedDetectionResult {
@@ -234,12 +238,18 @@ impl RecoveryEpoch {
                 largest_acked >= unacked.pkt_num + pkt_thresh
             {
                 // Flexicast.
-                // Do not drain the frames if this is the flexicast source because we will delegate them
+                // Do not drain the frames if this is the flexicast source because
+                // we will delegate them
                 if !(self.is_fc_source && !unacked.is_fc_delegated) {
                     self.lost_frames.extend(unacked.frames.drain(..));
                 }
 
                 unacked.time_lost = Some(now);
+
+                // Push the lost packet number for flexicast.
+                self.fc_new_lost_pkt
+                    .as_mut()
+                    .map(|pkts| pkts.push(unacked.pkt_num));
 
                 if unacked.pmtud {
                     pmtud_lost_bytes += unacked.size;
@@ -306,9 +316,7 @@ impl RecoveryEpoch {
                 // Flexicast extension.
                 // If this is the flexicast source, and the packet is not
                 // delegated yet, we cannot drain it.
-                if self.is_fc_source &&
-                    !pkt.is_fc_delegated
-                {
+                if self.is_fc_source && !pkt.is_fc_delegated {
                     break;
                 }
             }
@@ -959,6 +967,15 @@ impl Recovery {
             trace_id,
             epoch,
         );
+
+        // Flexicast.
+        // Retrieve the lost packets.
+        if let (Some(fcr), Some(fcre)) = (
+            self.fc_recovery.as_mut(),
+            self.epochs[epoch].fc_new_lost_pkt.as_mut(),
+        ) {
+            fcr.fc_new_lost_pn = fcre.drain(..).collect();
+        }
 
         if let Some(pkt) = loss.largest_lost_pkt {
             if !self.congestion.in_congestion_recovery(pkt.time_sent) {

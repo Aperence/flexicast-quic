@@ -1112,10 +1112,10 @@ impl FlexicastConnection for Connection {
 
         let pid = self.paths.pid_from_path_id(path_id).unwrap();
         let path = self.paths.get_mut(pid)?;
-        path.recovery.fc_recovery = Some(FcRecovery::new(false));
 
         // Add the first packet number of interest for the new path if possible.
         if let Some(flexicast) = self.flexicast.as_ref() {
+            path.recovery.init_fc_recovery_state(flexicast.get_mc_role());
             if let Some(pn) = flexicast
                 .fc_reliable
                 .server()

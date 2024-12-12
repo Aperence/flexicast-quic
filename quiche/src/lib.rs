@@ -8635,8 +8635,10 @@ impl Connection {
                         self.delivery_rate_check_if_app_limited(path_id);
                     let p = self.paths.get_mut(path_id)?;
 
-                    if p.recovery.fc_recovery.is_none() {
-                        p.recovery.fc_recovery = Some(FcRecovery::new(false));
+                    if let Some(flexicast) = self.flexicast.as_ref() {
+                        if p.recovery.fc_recovery.is_none() {
+                            p.recovery.init_fc_recovery_state(flexicast.get_mc_role());
+                        }
                     }
 
                     if is_app_limited {

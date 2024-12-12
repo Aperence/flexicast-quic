@@ -3,7 +3,6 @@
 
 use crate::packet::Epoch;
 use crate::ranges::RangeSet;
-use crate::recovery::flexicast::FcRecovery;
 use crate::Connection;
 use crate::Error;
 use crate::Result;
@@ -243,7 +242,7 @@ impl Connection {
                     .pid_from_path_id(path_id)
                     .ok_or(Error::Flexicast(FcError::McPath))?;
                 let p = self.paths.get_mut(pid)?;
-                p.recovery.fc_recovery = Some(FcRecovery::new(true));
+                p.recovery.init_fc_recovery_state(McRole::ServerFlexicast);
                 p.recovery.set_fc_recovery_epoch(true);
                 return Ok(());
             }
@@ -503,8 +502,6 @@ mod tests {
             let sent_pkt = path.recovery.get_sent_pkts();
             assert!(sent_pkt[1].time_acked.is_some());
 
-            let uc = &mut fc_pipe.unicast_pipes[0].0.server;
-            let path = uc.paths.get(1).unwrap();
             assert!(fc_pipe.mc_channel.channel.acked_bytes > nb_ack);
 
             // McAck state is empty.
@@ -1065,5 +1062,146 @@ mod tests {
         let mut readables = recv.readable().collect::<Vec<_>>();
         readables.sort();
         assert_eq!(readables, vec![3, 7, 11, 15, 19, 23]);
+    }
+
+    #[test]
+    /// Tests that a unicast path can ask for retransmissions of data on the
+    /// flexicast flow even before the acknowledgment aggregation.
+    /// 
+    /// Two receivers, one already sends its acknowledgments, not the other. The first one should receive the retransmissions.
+    fn test_fc_quic_reliability_recv_retransmit() {
+        let mut fc_config = FcConfig {
+            probe_mc_path: true,
+            ..Default::default()
+        };
+
+        // No expiration timer = no delayed acknowledgment.
+        fc_config.mc_announce_data[0].expiration_timer = 0;
+
+        let mut fc_pipe = FlexicastPipe::new(
+            2,
+            "/tmp/test_fc_quic_reliability_recv_retransmit",
+            &mut fc_config,
+        )
+        .unwrap();
+
+        let sleep_duration = time::Duration::from_millis(10);
+
+        let mut client_loss1 = RangeSet::default();
+        client_loss1.insert(0..1);
+        let mut client_loss2 = RangeSet::default();
+        client_loss2.insert(1..2);
+        let mut client_loss12 = RangeSet::default();
+        client_loss12.insert(0..2);
+
+        // The source sends 3 streams. First lost by recv 1, second lost by recv 2.
+        fc_pipe
+            .source_send_single_stream(true, Some(&client_loss1), 3)
+            .unwrap();
+        fc_pipe
+            .source_send_single_stream(true, Some(&client_loss12), 7)
+            .unwrap();
+        fc_pipe
+            .source_send_single_stream(true, None, 11)
+            .unwrap();
+
+        // Control to notify the sent packets.
+        let now = time::Instant::now();
+        fc_pipe.server_control_to_mc_source(now).unwrap();
+
+        // Acknowledgments from the first receiver.
+        fc_pipe.unicast_pipes[0].0.advance().unwrap();
+        
+        // Verify that the receiver correctly sent the acknowledgments.
+        let rmc_server = fc_pipe.unicast_pipes[0].0.server.flexicast.as_ref().unwrap().fc_reliable.server().unwrap();
+        let mut ack_pn = RangeSet::default();
+        ack_pn.insert(4..5);
+        assert_eq!(rmc_server.mc_ack.full_ack_poll().unwrap(), &ack_pn);
+        fc_pipe.server_control_to_mc_source(now).unwrap();
+
+        std::thread::sleep(sleep_duration);
+        fc_pipe.unicast_pipes[0].0.server.on_timeout();
+        fc_pipe.mc_channel.channel.send_ack_eliciting_on_path_with_path_id(1).unwrap();
+        let now = time::Instant::now();
+
+        // The unicast path of the first receiver has some lost packets.
+        let lost_pn_vec = &fc_pipe.unicast_pipes[0].0.server.paths.get(1).unwrap().recovery.fc_recovery.as_ref().unwrap().fc_new_lost_pn;
+        let lost_pn_res: HashSet<u64> = lost_pn_vec.iter().map(|i| *i).collect();
+        let lost_pn = [2, 3].iter().map(|i| *i).collect();
+        assert_eq!(lost_pn_res, lost_pn);
+
+        // And the receiver cannot read the lost stream.
+        let mut readables = fc_pipe.unicast_pipes[0].0.client.readable().collect::<Vec<_>>();
+        readables.sort();
+        assert_eq!(readables, vec![11]);
+
+        // The unicast path of the first receiver asks for retransmissions for this receiver.
+        let uc = &mut fc_pipe.unicast_pipes[0].0.server;
+        let retr_kind = FcUnicastRetransmission::PerUcPath(lost_pn);
+        fc_pipe.mc_channel.channel.rfc_delegate_streams(uc, now, retr_kind).unwrap();
+
+        // Communication on the unicast path.
+        fc_pipe.unicast_pipes[0].0.advance().unwrap();
+
+        // And now the receiver has the whole data.
+        let mut readables = fc_pipe.unicast_pipes[0].0.client.readable().collect::<Vec<_>>();
+        readables.sort();
+        assert_eq!(readables, vec![3, 7, 11]);
+
+        // The second receiver has two streams.
+        let mut readables = fc_pipe.unicast_pipes[1].0.client.readable().collect::<Vec<_>>();
+        readables.sort();
+        assert_eq!(readables, vec![3, 11]);
+
+        // And unicast communication + control to ensure that the source released the whole memory.
+        std::thread::sleep(sleep_duration);
+        let now = time::Instant::now();
+        fc_pipe.mc_channel.channel.on_timeout();
+        fc_pipe.mc_channel.channel.send_ack_eliciting_on_path_with_path_id(1).unwrap();
+        fc_pipe.source_send_single_stream(true, None, 15).unwrap();
+        fc_pipe.server_control_to_mc_source(now).unwrap();
+        
+        // Now the second receiver sends its acknowledgment.
+        fc_pipe.clients_send().unwrap();
+        fc_pipe.server_control_to_mc_source(now).unwrap();
+        std::thread::sleep(sleep_duration);
+        fc_pipe.mc_channel.channel.on_timeout();
+        fc_pipe.mc_channel.channel.send_ack_eliciting_on_path_with_path_id(1).unwrap();
+        let uc = &mut fc_pipe.unicast_pipes[1].0.server;
+        let retr_kind = FcUnicastRetransmission::Delegates(true);
+        fc_pipe.mc_channel.channel.rfc_delegate_streams(uc, now, retr_kind).unwrap();
+        fc_pipe.unicast_pipes[1].0.advance().unwrap();
+
+        // Now the second receiver has the whole data.
+        let mut readables = fc_pipe.unicast_pipes[1].0.client.readable().collect::<Vec<_>>();
+        readables.sort();
+        assert_eq!(readables, vec![3, 7, 11, 15]);
+
+        fc_pipe.source_send_single_stream(true, None, 19).unwrap();
+        fc_pipe.source_send_single_stream(true, None, 13).unwrap();
+        fc_pipe.server_control_to_mc_source(now).unwrap();
+        std::thread::sleep(sleep_duration);
+        fc_pipe.mc_channel.channel.on_timeout();
+        fc_pipe.mc_channel.channel.send_ack_eliciting_on_path_with_path_id(1).unwrap();
+        fc_pipe.source_send_single(None).unwrap();
+        fc_pipe.clients_send().unwrap();
+        fc_pipe.server_control_to_mc_source(now).unwrap();
+
+        for _ in 0..100 {
+            fc_pipe.mc_channel.channel.on_timeout();
+            fc_pipe.mc_channel.channel.send_ack_eliciting_on_path_with_path_id(1).unwrap();
+            fc_pipe.source_send_single(None).unwrap();
+            fc_pipe.clients_send().unwrap();
+            fc_pipe.server_control_to_mc_source(now).unwrap();
+            std::thread::sleep(sleep_duration);
+        }
+
+        let p = fc_pipe.mc_channel.channel.paths.get(1).unwrap();
+        let sent = p.recovery.get_sent_pkts();
+        assert!(sent.len() <= 1);
+
+        let mc_ack = fc_pipe.mc_channel.channel.get_mc_ack_mut().unwrap();
+        let (pns, ..) = mc_ack.get_state();
+        assert!(pns.len() <= 1);
     }
 }

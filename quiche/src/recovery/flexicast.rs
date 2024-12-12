@@ -6,6 +6,7 @@ use crate::fca_mut;
 use crate::flexicast::ack::McAck;
 use crate::flexicast::reliable::FcUnicastRetransmission;
 use crate::flexicast::FcError;
+use crate::flexicast::McRole;
 use crate::frame;
 use crate::packet::Epoch;
 use crate::ranges::RangeSet;
@@ -321,6 +322,20 @@ impl Recovery {
     /// Sets the recovery epoch flexicast source.
     pub(crate) fn set_fc_recovery_epoch(&mut self, v: bool) {
         self.epochs.iter_mut().for_each(|e| e.is_fc_source = v);
+    }
+
+    /// Initiates flexicast state for the recovery.
+    pub fn init_fc_recovery_state(&mut self, fc_role: McRole) {
+        match fc_role {
+            McRole::ServerFlexicast => self.fc_recovery = Some(FcRecovery::new(true)),
+            McRole::ServerUnicast(_) => {
+                self.fc_recovery = Some(FcRecovery::new(false));
+                self.epochs.iter_mut().for_each(|e| e.fc_new_lost_pkt = Some(Vec::new()));
+            },
+            McRole::Client(_) => self.fc_recovery = Some(FcRecovery::new(false)),
+            _ => (),
+        }
+        
     }
 }
 
