@@ -268,19 +268,23 @@ impl Connection {
         Ok(())
     }
 
-    /// Notifies the unicast path that some streams have been collected on the flexicast flow.
-    /// If this happens, the unicast path knows that it will not receive new unicast retransmissions
-    /// and it can collect its stream once all data is acknowledged.
+    /// Notifies the unicast path that some streams have been collected on the
+    /// flexicast flow. If this happens, the unicast path knows that it will
+    /// not receive new unicast retransmissions and it can collect its
+    /// stream once all data is acknowledged.
     pub fn fc_notify_collected_streams(&self, uc: &mut Connection) {
-        let stream_ids = uc.streams.fc_get_stream_ids().map(|id| *id).collect::<Vec<_>>();
+        let stream_ids = uc
+            .streams
+            .fc_get_stream_ids()
+            .map(|id| *id)
+            .collect::<Vec<_>>();
         for &stream_id in stream_ids.iter() {
             if self.streams.is_collected(stream_id) {
                 if let Some(stream) = uc.streams.get_mut(stream_id) {
                     stream.send.fc_set_close_offset();
-                    
+
                     // Maybe the stream is now complete.
-                    if stream.is_complete() && !stream.is_readable()
-                    {
+                    if stream.is_complete() && !stream.is_readable() {
                         let local = stream.local;
                         uc.streams.collect(stream_id, local);
                     }

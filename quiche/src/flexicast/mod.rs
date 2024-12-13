@@ -1228,8 +1228,9 @@ impl FlexicastConnection for Connection {
         // sent.
         let _ = fc_flow.fc_notify_sent_packets(self);
 
-        // The unicast path asks the flexicast flow if some streams have a fin offset.
-        // This happens when the flexicast flow collected some streams.
+        // The unicast path asks the flexicast flow if some streams have a fin
+        // offset. This happens when the flexicast flow collected some
+        // streams.
         fc_flow.fc_notify_collected_streams(self);
 
         Ok(())
@@ -1271,6 +1272,19 @@ impl Connection {
         let sent = self.fc_get_sent_pkt(highest_pn)?;
         let fc_id = fc_chan_idx!(fca)?;
         uc.fc_on_new_pkt_sent(fc_id, sent)
+    }
+
+    /// Returns whether bytes are in flight on the flexicast path.
+    pub fn fc_bytes_in_flight(&self) -> Option<bool> {
+        fc_chan_idx!(self.flexicast.as_ref()?)
+            .ok()
+            .map(|idx| {
+                self.paths
+                    .get(idx)
+                    .ok()
+                    .map(|p| p.recovery.bytes_in_flight())
+            })
+            .flatten()
     }
 }
 

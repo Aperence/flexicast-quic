@@ -124,9 +124,8 @@ impl Recovery {
             }
 
             if is_lost {
-
                 lost_pn.insert(packet.pkt_num..packet.pkt_num + 1);
-    
+
                 for frame in packet.frames.iter() {
                     match frame {
                         frame::Frame::StreamHeader {
@@ -136,34 +135,36 @@ impl Recovery {
                             fin,
                         } => {
                             nb_lost_mc_stream_frames += 1;
-    
+
                             trace!("Lost STREAM frame: ID={:?}, offset={:?}, length={:?}, fin={:?} is_collected={:?} from pn={}", stream_id, offset, length, fin, local_streams.is_collected(*stream_id), packet.pkt_num);
-    
+
                             // Get the stream on the flexicast flow.
                             let stream_fc = local_streams
                                 .get_mut(*stream_id)
                                 .ok_or(Error::InvalidStreamState(*stream_id))?;
-    
+
                             let is_collected_on_uc =
                                 uc.streams.is_collected(*stream_id);
                             let stream_uc = match uc
                                 .get_or_create_stream(*stream_id, stream_fc.local)
                             {
                                 Ok(v) => v,
-                                Err(Error::Done) if is_collected_on_uc => continue,
+                                Err(Error::Done) if is_collected_on_uc =>
+                                    continue,
                                 Err(e) => {
                                     return Err(e);
                                 },
                             };
                             let was_flushable_uc = stream_uc.is_flushable();
-    
-                            // We "ack" the recovery mechanism by asking to retransmit
+
+                            // We "ack" the recovery mechanism by asking to
+                            // retransmit
                             // the specified data... Since we
                             // call "send" on the data that is
                             // retransmitted, we assume that the call
                             // to "retransmit" wil be cancelled out.
                             stream_fc.send.retransmit(*offset, *length);
-    
+
                             // ...and we get the data. This is not optimized (2
                             // copies) but requires the fewest
                             // changes.
@@ -173,16 +174,21 @@ impl Recovery {
                             {
                                 continue;
                             }
-    
-                            // Notify the multicast acknowledgment aggregator that we
-                            // delegate a piece of stream.
+
+                            // Notify the multicast acknowledgment aggregator that
+                            // we delegate a piece of
+                            // stream.
                             if matches!(
                                 retr_kind,
                                 FcUnicastRetransmission::Delegates(_)
                             ) {
-                                mc_ack.delegate(*stream_id, *offset, *length as u64);
+                                mc_ack.delegate(
+                                    *stream_id,
+                                    *offset,
+                                    *length as u64,
+                                );
                             }
-    
+
                             let _written = match stream_uc.send.write_at_offset(
                                 &buf[..],
                                 *offset,
@@ -192,19 +198,21 @@ impl Recovery {
                                 Err(Error::FinalSize) => continue,
                                 Err(e) => return Err(e),
                             };
-    
+
                             // Mark the stream as flushable. We do not take into
                             // account flow limits because the
                             // data has already been sent once on
                             // the flexicast, and this data should be
                             // considered as a retransmission
                             // only.
-                            let priority_key = Arc::clone(&stream_uc.priority_key);
+                            let priority_key =
+                                Arc::clone(&stream_uc.priority_key);
                             if !was_flushable_uc {
                                 uc.streams.insert_flushable(&priority_key);
                             }
-    
-                            // Notify the unicast instance that this piece of stream
+
+                            // Notify the unicast instance that this piece of
+                            // stream
                             // has been delegated by the flexicast source.
                             // Only notify if this is not a full retransmission,
                             // i.e., the flexicast source must not be aware that
@@ -226,15 +234,14 @@ impl Recovery {
                                 }
                             }
                         },
-    
+
                         _ => (),
                     }
                 }
             }
 
             // Drain the frames of the packet if it is lost.
-            if matches!(retr_kind, FcUnicastRetransmission::Delegates(true))
-            {
+            if matches!(retr_kind, FcUnicastRetransmission::Delegates(true)) {
                 let _ = packet.frames.drain(..);
             }
 
@@ -243,7 +250,12 @@ impl Recovery {
 
         // Reset the packet numbers that have been received.
         if let Some(last_pn) = last_pkt_num {
-            fca_mut!(uc)?.fc_reliable.server_mut().unwrap().fc_pn_recv.remove_until(last_pn);
+            fca_mut!(uc)?
+                .fc_reliable
+                .server_mut()
+                .unwrap()
+                .fc_pn_recv
+                .remove_until(last_pn);
         }
         Ok((nb_lost_mc_stream_frames, (lost_pn, recv_pn)))
     }
@@ -421,6 +433,11 @@ impl Recovery {
             McRole::Client(_) => self.fc_recovery = Some(FcRecovery::new(false)),
             _ => (),
         }
+    }
+
+    /// Returns whether there are bytes in flight.
+    pub fn bytes_in_flight(&self) -> bool {
+        self.bytes_in_flight > 0
     }
 }
 

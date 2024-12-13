@@ -1154,6 +1154,9 @@ mod tests {
         let now = time::Instant::now();
         fc_pipe.server_control_to_mc_source(now).unwrap();
 
+        std::thread::sleep(sleep_duration);
+        let now = time::Instant::now();
+
         // Acknowledgments from the first receiver.
         fc_pipe.unicast_pipes[0].0.advance().unwrap();
         
@@ -1207,9 +1210,10 @@ mod tests {
         fc_pipe.server_control_to_mc_source(now).unwrap();
         
         // Now the second receiver sends its acknowledgment.
+        std::thread::sleep(sleep_duration);
+        let now = time::Instant::now();
         fc_pipe.clients_send().unwrap();
         fc_pipe.server_control_to_mc_source(now).unwrap();
-        std::thread::sleep(sleep_duration);
         fc_pipe.mc_channel.channel.on_timeout();
         fc_pipe.mc_channel.channel.send_ack_eliciting_on_path_with_path_id(1).unwrap();
         let uc = &mut fc_pipe.unicast_pipes[1].0.server;
@@ -1226,6 +1230,7 @@ mod tests {
         fc_pipe.source_send_single_stream(true, None, 13).unwrap();
         fc_pipe.server_control_to_mc_source(now).unwrap();
         std::thread::sleep(sleep_duration);
+        let now = time::Instant::now();
         fc_pipe.mc_channel.channel.on_timeout();
         fc_pipe.mc_channel.channel.send_ack_eliciting_on_path_with_path_id(1).unwrap();
         fc_pipe.source_send_single(None).unwrap();
@@ -1236,9 +1241,10 @@ mod tests {
             fc_pipe.mc_channel.channel.on_timeout();
             fc_pipe.mc_channel.channel.send_ack_eliciting_on_path_with_path_id(1).unwrap();
             fc_pipe.source_send_single(None).unwrap();
+            std::thread::sleep(sleep_duration);
+            let now = time::Instant::now();
             fc_pipe.clients_send().unwrap();
             fc_pipe.server_control_to_mc_source(now).unwrap();
-            std::thread::sleep(sleep_duration);
         }
 
         let p = fc_pipe.mc_channel.channel.paths.get(1).unwrap();
