@@ -8,6 +8,7 @@ use std::time;
 
 use super::reliable::FcUnicastRetransmission;
 use super::FcError;
+use super::McClientStatus;
 use super::McRole;
 use crate::flexicast::ack::FcDelegatedStream;
 use crate::flexicast::ack::McStreamOff;
@@ -131,13 +132,15 @@ impl Connection {
             return Ok(());
         }
 
-        let fc_path_id = flexicast
+        let pid = flexicast
             .get_fc_path_id()
+            .map(|path_id| self.paths.pid_from_path_id(path_id))
+            .flatten()
             .ok_or(Error::Flexicast(FcError::McPath))?;
 
         let handshake_status = self.handshake_status();
         let trace_id = self.trace_id().to_string();
-        let path = self.paths.get_mut(fc_path_id as usize)?;
+        let path = self.paths.get_mut(pid)?;
         let now = time::Instant::now();
 
         for pkt in sent
@@ -291,5 +294,74 @@ impl Connection {
                 }
             }
         }
+    }
+
+    /// Returns the per-receiver unicast path point of view of the flexicast
+    /// flow. This is possible since the unicast path instance has a view of
+    /// the sent packets.
+    ///
+    /// Returns `None` if this is not the unicast path source.
+    pub fn fc_get_flow_cwnd(&self) -> Option<usize> {
+        if let Some(flexicast) = self.flexicast.as_ref() {
+            if matches!(
+                flexicast.get_mc_role(),
+                McRole::ServerUnicast(McClientStatus::ListenMcPath(_))
+            ) {
+                if let Some(pid) = flexicast
+                    .get_fc_path_id()
+                    .map(|path_id| self.paths.pid_from_path_id(path_id))
+                    .flatten()
+                {
+                    if let Ok(uc_path) = self.paths.get(pid) {
+                        if uc_path.recovery.cwnd_available() == usize::MAX {
+                            return None;
+                        }
+                        return Some(uc_path.recovery.cwnd());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Sets the congestion window of the flexicast flow on the flexicast
+    /// source.
+    ///
+    /// This function should be called with the minimum per-receiver congestion
+    /// window.
+    ///
+    /// Does nothing if this is not the flexicast flow.
+    pub fn fc_set_flow_cwnd(&mut self, cwnd: usize) {
+        if let Some(flexicast) = self.flexicast.as_ref() {
+            if let Some(path_id) = flexicast
+                .get_fc_path_id()
+            {
+                self.fc_set_cwnd_from_path_id(path_id, cwnd);
+            }
+        }
+    }
+
+    /// Force the congestion window to a given value on the given path id, if it
+    /// exists.
+    pub fn fc_set_cwnd_from_path_id(&mut self, path_id: u64, cwin: usize) {
+        if let Some(pid) = self.paths.pid_from_path_id(path_id) {
+            if let Ok(path) = self.paths.get_mut(pid) {
+                path.recovery.fc_set_cwnd(cwin);
+            }
+        }
+    }
+
+    /// Sets the highest packet number that was sent on the flexicast flow.
+    pub fn fc_set_highest_fc_pn(&mut self, pn: u64) -> Result<()> {
+        if self.flexicast.is_none() {
+            return Err(Error::Flexicast(FcError::McDisabled));
+        }
+
+        let flexicast = self.flexicast.as_mut().unwrap();
+        if let Some(rfc) = flexicast.fc_reliable.server_mut() {
+            rfc.fc_highest_pn = Some(pn);
+        }
+
+        Ok(())
     }
 }

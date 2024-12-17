@@ -439,6 +439,14 @@ impl Recovery {
     pub fn bytes_in_flight(&self) -> bool {
         self.bytes_in_flight > 0
     }
+
+    /// Forces the congestion window to a given value.
+    ///
+    /// We add the `fc` prefix to highlight the fact that this is not a standard
+    /// quiche method, and hence it must be used carefully.
+    pub fn fc_set_cwnd(&mut self, cwin: usize) {
+        self.congestion.congestion_window = cwin;
+    }
 }
 
 #[cfg(test)]

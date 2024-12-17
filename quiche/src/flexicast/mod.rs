@@ -666,6 +666,11 @@ impl FlexicastAttributes {
 
         Err(Error::Flexicast(FcError::McPath))
     }
+
+    /// Returns a reference to the reliability mechanism.
+    pub fn get_fc_reliable(&self) -> &ReliableFc {
+        &self.fc_reliable
+    }
 }
 
 impl Default for FlexicastAttributes {
@@ -1156,15 +1161,15 @@ impl FlexicastConnection for Connection {
             .map(|fc| fc.fc_reliable.server_mut())
             .flatten()
         {
-            let fc_flow_next_pn = fc_flow.fc_next_pn();
+            let fc_pn: Option<(u64, u64)> = fc_flow.fc_next_and_first_pn();
             if rfc.fc_highest_pn.is_none() {
-                rfc.fc_highest_pn = fc_flow_next_pn;
+                rfc.fc_highest_pn = fc_pn.map(|(highest, _)| highest);
             }
 
             // Notify the flexicast flow that there is a new receiver.
             if let Some(rfc_source) = fc_flow.get_mc_ack_mut() {
                 if !rfc.notified_fc_source {
-                    rfc_source.new_recv(fc_flow_next_pn.unwrap_or(0));
+                    rfc_source.new_recv(fc_pn.unwrap_or((0, 0)).0);
 
                     rfc.notified_fc_source = true;
                 }
@@ -1246,18 +1251,23 @@ impl Connection {
             .is_some_and(|fc| fc.fc_path_id.is_some_and(|fcid| fcid == path_id))
     }
 
-    /// Returns the next packet number that will be sent on the flexicast flow.
-    fn fc_next_pn(&self) -> Option<u64> {
+    /// Returns the next packet number that will be sent on the flexicast flow, and the lowest packet number still in the sending queue.
+    pub fn fc_next_and_first_pn(&self) -> Option<(u64, u64)> {
         let fc_path_id =
             self.flexicast.as_ref().map(|fc| fc.fc_path_id).flatten()?;
 
-        Some(
-            self.pkt_num_spaces
+        
+        let next_pn = self.pkt_num_spaces
                 .spaces
                 .get(Epoch::Application, fc_path_id)
                 .ok()?
-                .next_pkt_num,
-        )
+                .next_pkt_num;
+        
+        let pid = self.paths.pid_from_path_id(fc_path_id)?;
+        let path = self.paths.get(pid).ok()?;
+        let first_pn = path.recovery.get_lowest_pn_app_epoch()?;
+
+        Some((next_pn, first_pn))
     }
 
     /// The flexicast flow notifies the unicast path the new packets sents.
@@ -1285,6 +1295,30 @@ impl Connection {
                     .map(|p| p.recovery.bytes_in_flight())
             })
             .flatten()
+    }
+
+    /// Sets the path ID of the flexicast flow.
+    pub fn fc_set_path_id(&mut self, path_id: Option<u64>) -> Result<()> {
+        if let Some(flexicast) = self.flexicast.as_mut() {
+            flexicast.fc_path_id = path_id;
+            Ok(())
+        } else {
+            Err(Error::Flexicast(FcError::McDisabled))
+        }
+    }
+
+    /// Returns whether the receiving side of the stream is finished and the
+    /// stream can be read until its end sequentially now. This means that
+    /// all the data of the stream can be read until its end without any loss.
+    #[inline]
+    pub fn stream_fully_readable(&self, stream_id: u64) -> bool {
+        let stream = match self.streams.get(stream_id) {
+            Some(v) => v,
+
+            None => return true,
+        };
+
+        stream.recv.is_fully_readable()
     }
 }
 
