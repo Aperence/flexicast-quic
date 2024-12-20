@@ -489,6 +489,7 @@ fn get_config(
     config.set_active_connection_id_limit(10);
     config.verify_peer(false);
     config.set_cc_algorithm(quiche::CongestionControlAlgorithm::CUBIC);
+    config.set_initial_max_path_id(10);
 
     if flexicast {
         config.set_initial_max_path_id(10);
@@ -599,10 +600,8 @@ impl ChannelState{
             server_addr,
             mc_announce_data.probe_path,
         );
-        if let Ok(_mc_space_id) = mc_space_id {
-            // QUESTION: keep this ?
-            //conn.set_mc_space_id(mc_space_id)
-            //    .unwrap();
+        if let Ok(mc_space_id) = mc_space_id {
+            conn.get_flexicast_attributes_mut().unwrap().set_fc_path_id(mc_space_id);
 
             // If soft-multicast is used by the source, the client
             // will receive multicast QUIC

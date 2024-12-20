@@ -802,14 +802,11 @@ fn main() {
         for (i, fc_chan) in fc_channels.iter_mut().enumerate() {
             if let Some(ref bitrates) = args.bitrates {
                 // Set the bitrate of each channel accordingly.
-                // TODO
-                /*
-                fc_chan.fc_chan.channel.fc_set_cwnd(
+                fc_chan.fc_chan.channel.fc_set_flow_cwnd(
                     (bitrates[i] /
                         (8 * fc_chan.mc_announce_data.expiration_timer))
                         as usize,
                 );
-                */
             } else {
                 // Rely on the congestion control.
                 /*
@@ -962,7 +959,7 @@ fn get_multicast_channel(
         public_key: None,
         expiration_timer: args.expiration_timer,
         is_processed: false,
-        bitrate: None,
+        bitrate: bitrate,
         fc_channel_algo: None,
         fc_channel_secret: None,
         qos: FcQos::Throughput | FcQos::Delay,
