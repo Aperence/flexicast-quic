@@ -12,6 +12,9 @@ use crate::ranges;
 use crate::ranges::RangeSet;
 use crate::CongestionControlAlgorithm;
 use crate::SendInfo;
+use congestion::FcCongestionState;
+use congestion::FcQos;
+use congestion::FlexicastCongestion;
 use reliable::RFcRecv;
 use reliable::RFcSource;
 use reliable::RFcUcPath;
@@ -163,6 +166,9 @@ pub const MC_STATE_CODE: u64 = 0xf4;
 pub const MC_KEY_CODE: u64 = 0xf5;
 /// MC_ASYM frame type.
 pub const MC_ASYM_CODE: u64 = 0xf8;
+/// MC_CONGESTION_INFO frame type.
+pub const MC_CONGESTION_INFO_CODE: u64 = 0xf9;
+
 
 /// The leaving action is requested by the client.
 pub const LEAVE_FROM_CLIENT: u64 = 0x0;
@@ -343,6 +349,8 @@ pub struct FlexicastAttributes {
     /// Structure handling the reliability between the flexicast flow and the
     /// unicast paths.
     pub(crate) fc_reliable: ReliableFc,
+
+    pub(crate) congestion_state: FcCongestionState
 }
 
 impl FlexicastAttributes {
@@ -688,6 +696,7 @@ impl Default for FlexicastAttributes {
             _fc_make_ack_elicit: false,
             fc_first_pn: None,
             fc_reliable: ReliableFc::Undefined,
+            congestion_state: FcCongestionState::default()
         }
     }
 }
@@ -746,6 +755,10 @@ pub struct McAnnounceData {
     /// channel. This value is used for example if different flexicast
     /// channels expose different data, e.g., streams at different quality.
     pub reset_stream_on_join: bool,
+
+    /// Quality of service provided by this flexicast channel.
+    /// Clients can decide which group to join according to their needs
+    pub qos: FcQos,
 }
 
 impl McAnnounceData {
@@ -834,6 +847,9 @@ pub trait FlexicastConnection {
 
     /// Returns the flexicast attributes.
     fn get_flexicast_attributes(&self) -> Option<&FlexicastAttributes>;
+
+    /// Returns a mutable reference to the flexicast attributes.
+    fn get_flexicast_attributes_mut(&mut self) -> Option<&mut FlexicastAttributes>;
 
     /// Synchronous communication between the unicast path and the flexicast
     /// flows. The unicast server connection sends control messages to the
@@ -956,6 +972,7 @@ impl FlexicastConnection for Connection {
                 mc_role,
                 mc_announce_data: vec![mc_data_cloned],
                 fc_reliable,
+                congestion_state: FcCongestionState::new(&self.fc_congestion_config),
                 ..Default::default()
             });
         }
@@ -967,7 +984,8 @@ impl FlexicastConnection for Connection {
         if let Some(flexicast) = self.flexicast.as_ref() {
             return self.fc_should_send_fc_announce().is_some() ||
                 flexicast.should_send_fc_state() ||
-                flexicast.should_send_fc_key();
+                flexicast.should_send_fc_key() ||
+                flexicast.should_send_fc_congestion_info();
         }
         false
     }
@@ -1139,6 +1157,10 @@ impl FlexicastConnection for Connection {
         self.flexicast.as_ref()
     }
 
+    fn get_flexicast_attributes_mut(&mut self) -> Option<&mut FlexicastAttributes> {
+        self.flexicast.as_mut()
+    }
+
     fn uc_to_fc_control(
         &mut self, fc_flow: &mut Connection, now: time::Instant,
     ) -> Result<()> {
@@ -1256,13 +1278,13 @@ impl Connection {
         let fc_path_id =
             self.flexicast.as_ref().map(|fc| fc.fc_path_id).flatten()?;
 
-        
+
         let next_pn = self.pkt_num_spaces
                 .spaces
                 .get(Epoch::Application, fc_path_id)
                 .ok()?
                 .next_pkt_num;
-        
+
         let pid = self.paths.pid_from_path_id(fc_path_id)?;
         let path = self.paths.get(pid).ok()?;
         let first_pn = path.recovery.get_lowest_pn_app_epoch()?;
@@ -2018,6 +2040,7 @@ pub mod testing {
             bitrate: None,
             fc_channel_algo: None,
             fc_channel_secret: None,
+            qos: FcQos::Throughput
         }
     }
 
@@ -2283,3 +2306,4 @@ mod tests {
 pub mod ack;
 pub mod control;
 pub mod reliable;
+pub mod congestion;

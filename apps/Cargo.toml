@@ -35,6 +35,8 @@ slab = "0.4"
 itertools = "0.10"
 clap = { version = "4.1", features = ["derive"] }
 tokio = { version = "1.40.0", features = ["full"] }
+polling = "3.7.4"
+socket2 = "0.5.8"
 
 [lib]
 crate-type = ["lib"]

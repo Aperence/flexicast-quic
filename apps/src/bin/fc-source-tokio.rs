@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::u64;
 
+use quiche::flexicast::congestion::FcQos;
 use quiche::flexicast::FlexicastChannelSource;
 use quiche::flexicast::FlexicastConnection;
 use quiche::flexicast::McConfig;
@@ -698,6 +699,7 @@ async fn get_flexicast_channel(
         bitrate: None,
         fc_channel_algo: None,
         fc_channel_secret: None,
+        qos: FcQos::None,
     };
 
     fc_chan

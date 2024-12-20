@@ -25,10 +25,14 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use std::convert::TryInto;
+use std::time::Duration;
 
 use crate::crypto::Algorithm;
+use crate::flexicast::congestion::FcCongestionInfo;
+use crate::flexicast::congestion::FcQos;
 use crate::flexicast::MC_ANNOUNCE_BW_CODE;
 use crate::flexicast::MC_ANNOUNCE_CODE;
+use crate::flexicast::MC_CONGESTION_INFO_CODE;
 use crate::flexicast::MC_KEY_CODE;
 use crate::flexicast::MC_STATE_CODE;
 use crate::Error;
@@ -244,6 +248,7 @@ pub enum Frame {
         expiration_timer: u64, // In ms
         public_key: Vec<u8>,
         bitrate: Option<u64>,
+        qos: FcQos
     },
 
     McState {
@@ -260,6 +265,11 @@ pub enum Frame {
         algo: Algorithm,
         first_pn: u64,
     },
+
+    FcCongestionInfo {
+        info: FcCongestionInfo
+    },
+
 }
 
 impl Frame {
@@ -491,6 +501,8 @@ impl Frame {
                     None
                 };
 
+                let qos = FcQos::from_bits(b.get_u8()?).unwrap();
+
                 Frame::McAnnounce {
                     channel_id,
                     probe_path,
@@ -502,6 +514,7 @@ impl Frame {
                     expiration_timer,
                     public_key,
                     bitrate,
+                    qos
                 }
             },
 
@@ -529,6 +542,27 @@ impl Frame {
                     first_pn,
                 }
             },
+
+            MC_CONGESTION_INFO_CODE => {
+                let cwnd = b.get_u32()? as usize;
+                let rtt = Duration::from_nanos(b.get_varint()?);
+
+                let size = b.get_u8()? as usize;
+
+                let mut mc_cwnds = vec![];
+                for _ in 0..size{
+                    let channel_id = b.get_bytes_with_u8_length()?.to_vec();
+                    let mc_cwnd = b.get_u32()? as usize;
+                    mc_cwnds.push((channel_id, mc_cwnd));
+                }
+
+                Frame::FcCongestionInfo {
+                    info: FcCongestionInfo{
+                        cwnd, mc_cwnds, rtt
+                    }
+                }
+            },
+
 
             _ => return Err(Error::InvalidFrame),
         };
@@ -863,6 +897,7 @@ impl Frame {
                 expiration_timer,
                 public_key,
                 bitrate,
+                qos,
             } => {
                 let ty = if bitrate.is_some() {
                     MC_ANNOUNCE_BW_CODE
@@ -884,6 +919,7 @@ impl Frame {
                 if let Some(bw) = bitrate {
                     b.put_varint(*bw)?;
                 }
+                b.put_u8(qos.bits())?;
             },
 
             Frame::McState {
@@ -913,6 +949,19 @@ impl Frame {
                 b.put_bytes(key)?;
                 b.put_u8(algo.to_owned().try_into().unwrap())?;
                 b.put_varint(*first_pn)?;
+            },
+
+            Frame::FcCongestionInfo { info } => {
+                debug!("going to encode the MC_CONGESTION_INFO frame: {:?}", info);
+                b.put_varint(MC_CONGESTION_INFO_CODE)?;
+                b.put_u32(info.cwnd as u32)?;
+                b.put_varint(info.rtt.as_nanos() as u64)?;
+                b.put_u8(info.mc_cwnds.len() as u8)?;
+                for (channel_id, mc_cwnd) in info.mc_cwnds.iter(){
+                    b.put_u8(channel_id.len() as u8)?;
+                    b.put_bytes(&channel_id)?;
+                    b.put_u32(*mc_cwnd as u32)?;
+                }
             },
         }
 
@@ -1177,6 +1226,7 @@ impl Frame {
                 expiration_timer: _,
                 public_key,
                 bitrate,
+                qos: _,
             } => {
                 let public_key_len_size =
                     octets::varint_len(public_key.len() as u64);
@@ -1196,7 +1246,8 @@ impl Frame {
                 2 + // udp_port
                 8 + // expiration_timer
                 public_key_len_size +
-                public_key.len()
+                public_key.len() +
+                1   // qos
             },
 
             Frame::McState {
@@ -1231,6 +1282,15 @@ impl Frame {
                 1 + // algo len
                 first_pn_size
             },
+
+            Frame::FcCongestionInfo { info } => {
+                let frame_type_size = octets::varint_len(MC_CONGESTION_INFO_CODE);
+                frame_type_size
+                + 4 // cwnd as u32
+                + octets::varint_len(info.rtt.as_nanos() as u64)
+                + 1 // size of mc_cwnds
+                + info.mc_cwnds.iter().map(|(channel_id, _)| 1 + channel_id.len() + 4).sum::<usize>()
+            },
         }
     }
 
@@ -1258,6 +1318,12 @@ impl Frame {
 
     #[cfg(feature = "qlog")]
     pub fn to_qlog(&self) -> QuicFrame {
+        use std::convert::TryFrom;
+
+        use qlog::events::RawInfo;
+
+        use crate::flexicast::FcClientAction;
+
         match self {
             Frame::Padding { len } => QuicFrame::Padding {
                 length: None,
@@ -1537,20 +1603,43 @@ impl Frame {
                 max_path_id: *max_path_id,
             },
 
-            Frame::McAnnounce { .. } => QuicFrame::Unknown {
+            Frame::McAnnounce { channel_id, group_ip, udp_port, .. } => QuicFrame::Unknown {
                 raw_frame_type: MC_ANNOUNCE_CODE,
                 frame_type_value: None,
-                raw: None,
+                raw: Some(RawInfo{
+                    data: Some(format!("{},{}:{}",
+                                channel_id.iter().map(|byte| format!("{:x?}", byte)).collect::<Vec<String>>().join(""),
+                                group_ip.iter().map(|block| format!("{}", block)).collect::<Vec<String>>().join("."),
+                                udp_port
+                            )),
+                    length: None,
+                    payload_length: None
+                }),
+
             },
 
-            Frame::McState { .. } => QuicFrame::Unknown {
-                raw_frame_type: MC_ANNOUNCE_CODE,
+            Frame::McState { channel_id, action, action_data } => QuicFrame::Unknown {
+                raw_frame_type: MC_STATE_CODE,
                 frame_type_value: None,
-                raw: None,
+                raw: Some(RawInfo{
+                    data: Some(format!("{},{:?},{}",
+                                channel_id.iter().map(|byte| format!("{:x?}", byte)).collect::<Vec<String>>().join(""),
+                                FcClientAction::try_from(*action).unwrap(),
+                                action_data
+                            )),
+                    length: None,
+                    payload_length: None
+                }),
             },
 
             Frame::McKey { .. } => QuicFrame::Unknown {
-                raw_frame_type: MC_ANNOUNCE_CODE,
+                raw_frame_type: MC_KEY_CODE,
+                frame_type_value: None,
+                raw: None,
+            },
+
+            Frame::FcCongestionInfo { .. } => QuicFrame::Unknown {
+                raw_frame_type: MC_CONGESTION_INFO_CODE,
                 frame_type_value: None,
                 raw: None,
             },
@@ -1792,8 +1881,9 @@ impl std::fmt::Debug for Frame {
                 expiration_timer,
                 public_key: _,
                 bitrate,
+                qos,
             } => {
-                write!(f, "MC_ANNOUNCE channel ID={:?}, probe_path={}, is_ipv6_addr={} reset_stream_on_join={} source_ip={:?}, group_ip={:?}, udp_port={}, expiration_timer={}, bitrate={:?}", channel_id, probe_path, is_ipv6_addr, reset_stream_on_join, source_ip, group_ip, udp_port, expiration_timer, bitrate)?;
+                write!(f, "MC_ANNOUNCE channel ID={:?}, probe_path={}, is_ipv6_addr={} reset_stream_on_join={} source_ip={:?}, group_ip={:?}, udp_port={}, expiration_timer={}, bitrate={:?}, qos={:?}", channel_id, probe_path, is_ipv6_addr, reset_stream_on_join, source_ip, group_ip, udp_port, expiration_timer, bitrate, qos)?;
             },
 
             Frame::McState {
@@ -1819,6 +1909,10 @@ impl std::fmt::Debug for Frame {
                     "MC_KEY channel ID={:?} key={:?} algo={:?} first pn={:?}",
                     channel_id, key, algo, first_pn,
                 )?;
+            },
+
+            Frame::FcCongestionInfo { info } => {
+                write!(f, "MC_CONGESTION_INFO info={:?}", info)?;
             },
         }
 
@@ -3136,6 +3230,7 @@ mod tests {
             expiration_timer: 350,
             public_key: vec![64, 33, 53, 127],
             bitrate: None,
+            qos: FcQos::None,
         };
 
         let wire_len = {
@@ -3180,6 +3275,7 @@ mod tests {
             expiration_timer: 350,
             public_key: vec![64, 33, 53, 127],
             bitrate: Some(10_000_000),
+            qos: FcQos::None,
         };
 
         let wire_len = {
@@ -3271,4 +3367,48 @@ mod tests {
         let mut b = octets::Octets::with_slice(&mut d);
         assert!(Frame::from_bytes(&mut b, packet::Type::Handshake,).is_err());
     }
+
+    #[test]
+    fn mc_congestion_info() {
+        let mut d = [41; 400];
+
+        let frame = Frame::FcCongestionInfo {
+            info: FcCongestionInfo{
+                cwnd: 42, mc_cwnds: vec![], rtt: Duration::from_millis(10)
+            }
+        };
+
+        let wire_len = {
+            let mut b = octets::OctetsMut::with_slice(&mut d);
+            frame.to_bytes(&mut b).unwrap()
+        };
+
+        assert_eq!(wire_len, 6);
+
+        let mut b = octets::Octets::with_slice(&mut d);
+        assert_eq!(
+            Frame::from_bytes(&mut b, packet::Type::Short),
+            Ok(frame.clone())
+        );
+
+        let mut b = octets::Octets::with_slice(&mut d);
+        assert!(
+            Frame::from_bytes(&mut b, packet::Type::Initial)
+                .is_err()
+        );
+
+        let mut b = octets::Octets::with_slice(&mut d);
+        assert!(
+            Frame::from_bytes(&mut b, packet::Type::ZeroRTT)
+                .is_ok()
+        );
+
+        let mut b = octets::Octets::with_slice(&mut d);
+        assert!(Frame::from_bytes(
+            &mut b,
+            packet::Type::Handshake,
+        )
+        .is_err());
+    }
+
 }

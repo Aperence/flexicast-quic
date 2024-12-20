@@ -382,7 +382,11 @@
 #[macro_use]
 extern crate log;
 
+use ancillaries::Ancillary;
 use cid::PathIdIter;
+use flexicast::congestion::FcCongestionConf;
+use flexicast::congestion::FcCongestionHeuristic;
+use flexicast::congestion::FlexicastCongestionConnection;
 use flexicast::FcError;
 use flexicast::FlexicastAttributes;
 use flexicast::FlexicastConnection;
@@ -422,6 +426,7 @@ use std::str::FromStr;
 
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use smallvec::SmallVec;
 
@@ -850,6 +855,9 @@ pub struct Config {
     max_amplification_factor: usize,
 
     disable_dcid_reuse: bool,
+
+    fc_congestion_info_delay: Duration,
+    fc_congestion_heuristic: FcCongestionHeuristic,
 }
 
 // See https://quicwg.org/base-drafts/rfc9000.html#section-15
@@ -918,6 +926,9 @@ impl Config {
             max_amplification_factor: MAX_AMPLIFICATION_FACTOR,
 
             disable_dcid_reuse: false,
+
+            fc_congestion_info_delay: Duration::from_millis(100),
+            fc_congestion_heuristic: FcCongestionHeuristic::PROBE,
         })
     }
 
@@ -1618,6 +1629,7 @@ pub struct Connection {
 
     /// Flexicast extension attributes.
     flexicast: Option<FlexicastAttributes>,
+    fc_congestion_config: FcCongestionConf,
 }
 
 /// Creates a new server-side connection.
@@ -2060,6 +2072,7 @@ impl Connection {
             path_id_to_abandon: VecDeque::new(),
 
             flexicast: None,
+            fc_congestion_config: FcCongestionConf::from_config(&config)
         };
 
         // Don't support multipath with zero-length CIDs.
@@ -2166,6 +2179,8 @@ impl Connection {
         &mut self, writer: Box<dyn std::io::Write + Send + Sync>, title: String,
         description: String, qlog_level: QlogLevel,
     ) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
         let vp = if self.is_server {
             qlog::VantagePointType::Server
         } else {
@@ -2191,7 +2206,7 @@ impl Connection {
             Some(title.to_string()),
             Some(description.to_string()),
             Some(qlog::Configuration {
-                time_offset: Some(0.0),
+                time_offset: Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as f64),
                 original_uris: None,
             }),
             None,
@@ -2254,6 +2269,16 @@ impl Connection {
         self.process_peer_transport_params(peer_params)?;
 
         Ok(())
+    }
+
+    /// Process data received from a peer with additional ancillaries
+    pub fn recv_with_ancillaries(&mut self, buf: &mut [u8], info: RecvInfo, ancillaries: Vec<Ancillary>) -> Result<usize> {
+        if info.from_mc{
+            if let Some(flexicast) = &mut self.flexicast{
+                flexicast.congestion_state.update_ancillaries(ancillaries);
+            }
+        }
+        self.recv(buf, info)
     }
 
     /// Processes QUIC packets received from the peer.
@@ -3023,6 +3048,10 @@ impl Connection {
             self.got_peer_conn_id = true;
         }
 
+        // Update multicast congestion state
+        self.mc_update_loss();
+        self.mc_update_recv();
+
         // To avoid sending an ACK in response to an ACK-only packet, we need
         // to keep track of whether this packet contains any frame other than
         // ACK and PADDING.
@@ -3355,6 +3384,12 @@ impl Connection {
                                 flexicast::FcClientAction::DecryptionKey,
                                 None,
                             )?;
+                        }
+                    },
+
+                    frame::Frame::FcCongestionInfo { info } => {
+                        if let Some(flexicast) = self.flexicast.as_mut() {
+                            flexicast.congestion_state.received_congestion_info = Some(info);
                         }
                     },
 
@@ -4798,6 +4833,7 @@ impl Connection {
                         Vec::new()
                     },
                     bitrate: mc_announce_data.bitrate,
+                    qos: mc_announce_data.qos.clone(),
                 };
 
                 if push_frame_to_pkt!(b, frames, frame, left) {
@@ -4892,6 +4928,21 @@ impl Connection {
                     }
                 }
             }
+
+            // Create MC_CONGESTION_INFO frame.
+            if let Some(flexicast) = self.flexicast.as_mut() {
+                let congestion_state = &mut flexicast.congestion_state;
+                if congestion_state.should_send_congestion_info(now) {
+                    let congestion_info = congestion_state.get_congestion_info();
+                    let frame = frame::Frame::FcCongestionInfo {
+                        info: congestion_info.clone()
+                    };
+                    if push_frame_to_pkt!(b, frames, frame, left) {
+                        congestion_state.sending_congestion_info();
+                    }
+                }
+            }
+
         }
 
         let path = self.paths.get_mut(send_pid)?;
@@ -7146,7 +7197,7 @@ impl Connection {
             self.local_transport_params.active_conn_id_limit,
         ) as usize;
 
-        max_active_source_cids - self.active_scids()
+        max_active_source_cids.saturating_sub(self.active_scids())
     }
 
     /// Requests the retirement of the destination Connection ID used by the
@@ -8672,18 +8723,18 @@ impl Connection {
                     // Only get the newly acked.
                     if let Some(pid) = self.paths.pid_from_path_id(path_identifier) {
                         let p = self.paths.get_mut(pid)?;
-    
+
                         if let Some(rfc) = p.recovery.fc_recovery.as_mut() {
                             let pn_new_ack = rfc.fc_new_ack_pn.drain(..);
                             let mut new_ack_rs = crate::ranges::RangeSet::default();
                             for pn in pn_new_ack {
                                 new_ack_rs.insert(pn..pn + 1);
                             }
-    
+
                             // Sanity check: should be the unicast path.
                             if let Some(rfc) = flexicast.fc_reliable.server_mut() {
                                 rfc.mc_ack.on_ack_received(&new_ack_rs);
-    
+
                                 // Also mark the packet as received in the range.
                                 for range in new_ack_rs.iter() {
                                     rfc.fc_pn_recv.insert(range);
@@ -8819,8 +8870,9 @@ impl Connection {
                 expiration_timer,
                 public_key,
                 bitrate,
+                qos,
             } => {
-                debug!("Received an FC_ANNOUNCE frame! FC_ANNOUNCE channel ID={:?}, probe_path={}, is_ipv6_addr={}, reset_stream_on_joih={}, source_ip={:?}, group_ip={:?}, udp_port={}, bitrate={:?}", channel_id, probe_path, is_ipv6_addr, reset_stream_on_join, source_ip, group_ip, udp_port, bitrate);
+                debug!("Received an FC_ANNOUNCE frame! FC_ANNOUNCE channel ID={:?}, probe_path={}, is_ipv6_addr={}, reset_stream_on_joih={}, source_ip={:?}, group_ip={:?}, udp_port={}, bitrate={:?}, qos={:?}", channel_id, probe_path, is_ipv6_addr, reset_stream_on_join, source_ip, group_ip, udp_port, bitrate, qos);
                 if self.is_server {
                     error!("The server should not receive an FC_ANNOUNCE frame!");
                     return Err(Error::InvalidFrame);
@@ -8844,6 +8896,7 @@ impl Connection {
                     bitrate,
                     fc_channel_algo: None,
                     fc_channel_secret: None,
+                    qos
                 };
 
                 self.fc_set_announce_data(&mc_announce_data)?;
@@ -8955,6 +9008,17 @@ impl Connection {
                         flexicast::FcError::McInvalidSymKey,
                     ));
                 },
+
+            frame::Frame::FcCongestionInfo { info } => {
+                if let Some(flexicast) = self.flexicast.as_mut(){
+                    debug!(
+                        "Received an MC_CONGESTION_INFO frame! info = {:?}",
+                        info,
+                    );
+                    flexicast.congestion_state.received_congestion_info = Some(info);
+                }
+            },
+
         };
         Ok(())
     }
@@ -19623,6 +19687,7 @@ pub use crate::recovery::congestion::CongestionControlAlgorithm;
 
 pub use crate::stream::StreamIter;
 
+pub mod ancillaries;
 mod cid;
 mod crypto;
 mod dgram;
