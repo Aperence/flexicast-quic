@@ -1629,6 +1629,7 @@ pub struct Connection {
 
     /// Flexicast extension attributes.
     flexicast: Option<FlexicastAttributes>,
+    fc_next_path: u64,
     fc_congestion_config: FcCongestionConf,
 }
 
@@ -2072,6 +2073,7 @@ impl Connection {
             path_id_to_abandon: VecDeque::new(),
 
             flexicast: None,
+            fc_next_path: 1,
             fc_congestion_config: FcCongestionConf::from_config(&config)
         };
 

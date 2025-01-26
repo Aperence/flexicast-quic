@@ -4,12 +4,14 @@ use std::convert::TryFrom;
 use std::convert::TryInto;
 use std::io::BufRead;
 use std::net::SocketAddr;
+use std::path;
 use std::time;
 
 use crate::packet::Epoch;
 use crate::rand::rand_bytes;
 use crate::ranges;
 use crate::ranges::RangeSet;
+use crate::recovery::flexicast;
 use crate::CongestionControlAlgorithm;
 use crate::SendInfo;
 use congestion::FcCongestionState;
@@ -1075,7 +1077,7 @@ impl FlexicastConnection for Connection {
             .fill(&mut reset_token)
             .unwrap();
         let reset_token = u128::from_be_bytes(reset_token);
-        self.new_scid_on_path(1, cid, reset_token, true)?;
+        self.new_scid_on_path(self.fc_next_path, cid, reset_token, true)?;
 
         Ok(())
     }
@@ -1126,6 +1128,7 @@ impl FlexicastConnection for Connection {
             };
 
             self.is_server = was_server;
+            self.fc_next_path += 1;
 
             Ok(path.path_id())
         }?;
