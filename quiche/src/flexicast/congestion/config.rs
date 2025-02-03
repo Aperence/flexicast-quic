@@ -1,8 +1,10 @@
+//! Configuration extension for multicast congestion control
 use std::time::Duration;
 
 use crate::Config;
 use super::FcCongestionHeuristic;
 
+/// Configuration of the multicast congestion control
 pub trait FcCongestionConfig{
     /// Sets the delay between two successive sends of the MC_CONGESTION_INFO
     /// frame

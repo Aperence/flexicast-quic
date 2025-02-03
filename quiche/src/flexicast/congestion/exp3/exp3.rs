@@ -1,41 +1,38 @@
-use rand::prelude::*;
+//! Implementation of an EXP3 instance
+use std::fmt::Display;
 
-
-trait Action: PartialEq + Eq + Sized + Clone{
-    fn get_actions() -> Vec<Self>;
-}
+use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
 
 #[derive(Debug)]
-enum EXP3Error{
+pub(crate) enum EXP3Error{
     AlreadyTaken,
     NotTaken,
     InvalidReward
 }
 
-struct EXP3<T: Action>{
+#[derive(Debug)]
+pub(crate) struct EXP3{
     k: usize,
-    actions: Vec<T>,
     weights: Vec<f64>,
     probas: Vec<f64>,
     gamma: f64,
-    taken_action: Option<T>,
-    rng: ThreadRng
+    taken_action: Option<usize>,
+    rng: SmallRng
 }
 
-impl<T: Action> EXP3<T>{
-    pub fn new(actions: Vec<T>, gamma: Option<f64>) -> EXP3<T>{
-        let k = actions.len();
+impl EXP3{
+    pub fn new(k: usize, gamma: Option<f64>) -> EXP3{
+        let k = k;
         let mut weights = Vec::new();
         weights.resize(k, 1.0);
         let gamma = gamma.unwrap_or(0.1);
         let mut exp3 = EXP3{
             k,
-            actions,
             weights,
             probas: vec![],
             gamma,
             taken_action: None,
-            rng: thread_rng()
+            rng: SmallRng::from_entropy()
         };
         exp3.compute_probas();
         exp3
@@ -49,16 +46,17 @@ impl<T: Action> EXP3<T>{
         self.probas = probas;
     }
 
-    pub fn take_action(&mut self, banned: Vec<T>) -> Result<T, EXP3Error>{
+    pub fn take_action(&mut self, banned: Vec<usize>) -> Result<usize, EXP3Error>{
         if self.taken_action.is_some(){
             return Err(EXP3Error::AlreadyTaken);
         }
         self.compute_probas();
 
-        let updated_probas =
-            self.actions.iter().zip(&self.probas)
+        let updated_probas = self.probas
+                .iter()
+                .enumerate()
                 .map(|(action, proba)|{
-                    if banned.contains(action){
+                    if banned.contains(&action){
                         0.0
                     }else{
                         *proba
@@ -67,7 +65,7 @@ impl<T: Action> EXP3<T>{
 
         let norm = Self::normalize(&updated_probas);
 
-        let weighted_actions: Vec<(&T, f64)> = self.actions.iter().zip(norm).collect();
+        let weighted_actions: Vec<(usize, &f64)> = norm.iter().enumerate().collect();
         let action =
             weighted_actions
                 .choose_weighted(&mut self.rng, |(_action, prob)| *prob).unwrap().0.clone();
@@ -86,27 +84,37 @@ impl<T: Action> EXP3<T>{
         if value > 1.0 || value < 0.0{
             return Err(EXP3Error::InvalidReward);
         }
-        if self.taken_action.is_none(){
-            return Err(EXP3Error::NotTaken)
-        }
+        if let Some(taken_action) = self.taken_action{
+            let gamma = self.gamma;
 
-        let gamma = self.gamma;
-
-        self.weights =
-            self.actions.iter().zip(&self.weights).zip(&self.probas).map(|((action, weight), proba)|{
-                let reward = if self.taken_action.as_ref().unwrap() == action{
+            for i in 0..self.k{
+                let weight = self.weights[i];
+                let proba = self.probas[i];
+                let reward = if taken_action == i{
                     value / proba
                 }else{
                     0.0
                 };
                 let e = std::f64::consts::E;
                 let new_weight = weight * e.powf(gamma * reward / self.k as f64);
-                new_weight.clamp(1e-3, 1e3)
-            }).collect();
+                let new_weight = new_weight.clamp(1e-3, 1e3);
+                self.weights[i] = new_weight;
+            }
 
-        self.weights = Self::normalize(&self.weights);
+            self.weights = Self::normalize(&self.weights);
 
-        self.taken_action = None;
+            self.taken_action = None;
+            Ok(())
+        }else{
+            Err(EXP3Error::NotTaken)
+        }
+    }
+}
+
+impl Display for EXP3{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let probas: Vec<String> = self.probas.iter().map(|proba| format!("{:.2}", proba)).collect();
+        write!(f, "{}", probas.join(","))?;
         Ok(())
     }
 }
@@ -117,24 +125,12 @@ mod tests {
 
     use super::*;
 
-    #[derive(Eq, PartialEq, Clone, Hash, Debug)]
-    enum ImplAction{
-        A,
-        B
-    }
-
-    impl Action for ImplAction{
-        fn get_actions() -> Vec<Self> {
-            vec![Self::A, Self::B]
-        }
-    }
-
     #[test]
     fn basic() {
-        let mut exp3 = EXP3::new(ImplAction::get_actions(), None);
+        let mut exp3 = EXP3::new(2, None);
 
         let action = exp3.take_action(vec![]);
-        assert!(matches!(action, Ok(ImplAction::A | ImplAction::B)));
+        assert!(matches!(action, Ok(0 | 1)));
 
         let action = exp3.take_action(vec![]);
         assert!(matches!(action, Err(EXP3Error::AlreadyTaken)));
@@ -142,7 +138,7 @@ mod tests {
 
     #[test]
     fn advanced() {
-        let mut exp3 = EXP3::new(ImplAction::get_actions(), None);
+        let mut exp3 = EXP3::new(2, None);
 
         let mut counts = HashMap::new();
         for _ in 0..100{
@@ -150,14 +146,11 @@ mod tests {
 
             *counts.entry(action.clone()).or_insert(0) += 1;
 
-            let reward = match action {
-                ImplAction::A => 1.0,
-                ImplAction::B => 0.0,
-            };
+            let reward = action as f64;
 
             exp3.reward(reward).unwrap();
         }
 
-        assert!(*counts.get(&ImplAction::A).unwrap() > 65);
+        assert!(*counts.get(&1).unwrap() > 65);
     }
 }

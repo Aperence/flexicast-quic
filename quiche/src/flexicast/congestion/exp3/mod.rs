@@ -1,0 +1,160 @@
+//! EXP3 congestion control algorithm
+use std::{collections::HashMap, fmt::Display, time::{Duration, Instant}};
+
+use crate::flexicast::{FlexicastAttributes, McAnnounceData};
+
+use super::{FcCongestionConf, FcCongestionHeuristicOps};
+use exp3::EXP3;
+
+static GAMMA: f64 = 0.15;
+type CID = Vec<u8>;
+
+/// Join groups depending on an EXP3 heuristic
+/// TODO: elaborate
+pub static EXP3_HEURISTIC: FcCongestionHeuristicOps = FcCongestionHeuristicOps {
+    should_change_channel: exp3_should_change_channel
+};
+
+fn exp3_should_change_channel(flexicast: &mut FlexicastAttributes) -> Option<Vec<u8>> {
+    let announce_data = &flexicast.mc_announce_data;
+    let current_channel_cid = flexicast.get_mc_announce_data_active().unwrap().channel_id.clone();
+    let exp3_state = &mut flexicast.congestion_state.exp3_state;
+
+    let now = Instant::now();
+    if exp3_state.wait_timeout_elapsed(now){
+        exp3_state.last_taken_action = now;
+
+        exp3_state.update_instances(announce_data);
+        let current_channel_idx = exp3_state.ordered_channels.iter().position(|c| c == &current_channel_cid).unwrap();
+
+        println!("State:\n{}", exp3_state);
+
+        if let Some(previous_cid) = &exp3_state.previous_channel{
+            let reward = exp3_state.reward();
+            exp3_state.instances
+                .entry(previous_cid.clone())
+                .and_modify(|e| {
+                    e.reward(reward).expect("Unexpected failure to give a reward");
+                });
+        }
+
+        let banned = exp3_state.get_banned();
+
+        let exp3_instance = exp3_state.instances.get_mut(&current_channel_cid)
+            .expect("Should have an instance for the current channel");
+
+        println!("Taking action for channel {}", current_channel_idx);
+        let action: Action = exp3_instance.take_action(banned).expect("Failed to take action").into();
+        println!("Action is: {:?}", action);
+
+        exp3_state.previous_channel = Some(current_channel_cid.clone());
+
+        let new_channel = match action{
+            Action::Increase if current_channel_idx < exp3_state.ordered_channels.len() => {
+                Some(exp3_state.ordered_channels[current_channel_idx + 1].clone())
+            },
+            Action::Decrease if current_channel_idx > 0 => {
+                Some(exp3_state.ordered_channels[current_channel_idx - 1].clone())
+            },
+            _ => None,
+        };
+        return new_channel;
+    }
+    None
+}
+
+#[derive(Debug)]
+enum Action {
+    Increase = 0,
+    Decrease = 1,
+    Stay = 2
+}
+
+impl From<usize> for Action{
+    fn from(value: usize) -> Self {
+        match value {
+            0 => Action::Increase,
+            1 => Action::Decrease,
+            2 => Action::Stay,
+            _ => unreachable!("Unknown value")
+        }
+    }
+}
+
+impl From<Action> for usize{
+    fn from(value: Action) -> Self {
+        match value {
+            Action::Increase => 0,
+            Action::Decrease => 1,
+            Action::Stay => 2,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct EXP3State{
+    instances: HashMap<CID, EXP3>,
+    last_taken_action: Instant,
+    ordered_channels: Vec<CID>,
+    previous_channel: Option<CID>
+}
+
+impl EXP3State {
+    pub(crate) fn new(_config: &FcCongestionConf) -> Self{
+        Self::default()
+    }
+
+    fn update_instances(&mut self, announce_data: &Vec<McAnnounceData>){
+        for announce in announce_data{
+            if !self.instances.contains_key(&announce.channel_id){
+                let instance = EXP3::new(3, Some(GAMMA));
+                self.instances.insert(announce.channel_id.clone(), instance);
+            }
+        }
+
+        let mut ordered_channels: Vec<(CID, u64)> = announce_data
+            .iter()
+            .map(|announce| (announce.channel_id.clone(), announce.bitrate.unwrap_or(0)))
+            .collect();
+        ordered_channels.sort_by(|a, b| a.1.cmp(&b.1));
+        self.ordered_channels = ordered_channels.into_iter().map(|(cid, _)| cid).collect();
+    }
+
+    fn wait_timeout_elapsed(&self, now: Instant) -> bool{
+        now > self.last_taken_action + Duration::from_secs(5)
+    }
+
+    fn reward(&self) -> f64{
+        0.0
+    }
+
+    fn get_banned(&self) -> Vec<usize>{
+        vec![]
+    }
+}
+
+impl Display for EXP3State{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (cid, instance) in &self.instances{
+            for val in cid{
+                write!(f, "{:02x}", val)?;
+            }
+            write!(f, ": ")?;
+            write!(f, "{}\n", instance)?;
+        }
+        Ok(())
+    }
+}
+
+impl Default for EXP3State{
+    fn default() -> Self {
+        Self {
+            instances: HashMap::new(),
+            last_taken_action: Instant::now(),
+            ordered_channels: vec![],
+            previous_channel: None,
+        }
+    }
+}
+
+pub mod exp3;

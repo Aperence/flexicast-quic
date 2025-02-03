@@ -928,7 +928,7 @@ impl Config {
             disable_dcid_reuse: false,
 
             fc_congestion_info_delay: Duration::from_millis(100),
-            fc_congestion_heuristic: FcCongestionHeuristic::PROBE,
+            fc_congestion_heuristic: FcCongestionHeuristic::EXP3,
         })
     }
 

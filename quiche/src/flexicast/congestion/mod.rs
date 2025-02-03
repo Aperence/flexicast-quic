@@ -1,5 +1,6 @@
 //! Handles the congestion control for multicast
 use std::time::{self, Duration, Instant};
+use exp3::{EXP3State, EXP3_HEURISTIC};
 use probe::ProbeState;
 
 use crate::{ancillaries::{Ancillary, ECNValue}, Config, Connection};
@@ -8,7 +9,8 @@ use super::{FlexicastAttributes, FlexicastChannelSource, McRole};
 
 const MAX_DELAY_MULTIPLIER: u32 = 16;
 
-/// TODO
+/// An heuristic returning whether a multicast client should change
+/// the channel it is listening to, in reaction to congestion.
 pub struct FcCongestionHeuristicOps {
     should_change_channel: fn(flexicast: &mut FlexicastAttributes) -> Option<Vec<u8>>
 }
@@ -17,11 +19,13 @@ pub struct FcCongestionHeuristicOps {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(C)]
 pub enum FcCongestionHeuristic {
+    /// Use EXP3 to drive which group to join
+    EXP3       = 0,
     /// Join the group with closest rate
-    KMEANS     = 0,
+    KMEANS     = 1,
     /// Incrementally join groups with higher rates, if no congestion signal
     /// are detected
-    PROBE      = 1,
+    PROBE      = 2,
 }
 
 impl From<FcCongestionHeuristic> for &'static FcCongestionHeuristicOps {
@@ -29,19 +33,16 @@ impl From<FcCongestionHeuristic> for &'static FcCongestionHeuristicOps {
         match heuristic {
             FcCongestionHeuristic::KMEANS => &kmeans::KMEANS,
             FcCongestionHeuristic::PROBE => &probe::PROBE,
+            FcCongestionHeuristic::EXP3 => &exp3::EXP3_HEURISTIC,
         }
     }
 }
 
 pub(crate) struct FcCongestionState{
     delay_congestion_info: time::Duration,
-
     base_delay_congestion_info: time::Duration,
-
     next_congestion_info: time::Instant,
-
     local_congestion_info: Option<FcCongestionInfo>,
-
     pub(crate) received_congestion_info: Option<FcCongestionInfo>,
 
     mc_congestion_scheduler: &'static FcCongestionHeuristicOps,
@@ -49,11 +50,10 @@ pub(crate) struct FcCongestionState{
     last_migration: time::Instant,
 
     pub(crate) probe_state: probe::ProbeState,
+    pub(crate) exp3_state: exp3::EXP3State,
 
     curr_channel_idx: usize,
-
     lost_count: usize,
-
     recv_count: usize,
 }
 
@@ -66,9 +66,10 @@ impl Default for FcCongestionState{
             next_congestion_info: Instant::now().checked_add(delay).unwrap(),
             local_congestion_info: None,
             received_congestion_info: None,
-            mc_congestion_scheduler: &kmeans::KMEANS,
+            mc_congestion_scheduler: &exp3::EXP3_HEURISTIC,
             last_migration: Instant::now(),
             probe_state: ProbeState::default(),
+            exp3_state: EXP3State::default(),
             lost_count: 0,
             recv_count: 0,
             curr_channel_idx: 0,
@@ -87,17 +88,11 @@ impl FcCongestionState{
             mc_congestion_scheduler: config.cc_heuristic,
             last_migration: Instant::now(),
             probe_state: ProbeState::new(config),
+            exp3_state: EXP3State::new(config),
             lost_count: 0,
             recv_count: 0,
             curr_channel_idx: 0,
         }
-    }
-
-    pub(crate) fn congestion_info_timeout(&self) -> Option<Instant> {
-        if self.local_congestion_info.is_none(){
-            return None;
-        }
-        Some(self.next_congestion_info)
     }
 
     pub(crate) fn should_send_congestion_info(&self, now: Instant) -> bool {
@@ -143,7 +138,7 @@ impl FcCongestionState{
         let mut marked = false;
         for ancillary in ancillaries{
             match ancillary{
-                Ancillary::TTL(ttl) => (), // use it later
+                Ancillary::TTL(_ttl) => (), // use it later
                 Ancillary::ECN(ecnvalue) => {
                     if ecnvalue == ECNValue::CE{
                         self.probe_state.packet_marked();
@@ -165,11 +160,18 @@ impl FcCongestionState{
 
 /// Congestion control for multicast
 pub trait FlexicastCongestion {
-    /// TODO
+    /// sets the congestion info of a multicast receiver
+    /// This function is typically called when a MC_CONGESTION_INFO
+    /// frame is received by a client
     fn mc_set_congestion_info(&mut self, info: FcCongestionInfo);
-    /// TODO
+
+    /// Whether a multicast receiver should change of channels
+    /// This function returns a the CID of the new channel to
+    /// join
     fn should_change_channel(&mut self) -> Option<Vec<u8>>;
 
+    /// Whether a server should send a MC_CONGESTION_INFO frame
+    /// or not
     fn should_send_fc_congestion_info(&self) -> bool;
 }
 
@@ -193,12 +195,13 @@ impl FlexicastCongestion for FlexicastAttributes{
 
 /// Internal congestion control for multicast
 pub trait FlexicastCongestionConnection {
-    /// TODO
+    /// Update the loss rate of the multicast channel
     fn mc_update_loss(&mut self) -> Option<()>;
-    /// TODO
+    /// Update the reception rate of the multicast channel
     fn mc_update_recv(&mut self) -> Option<()>;
 
-    /// TODO: Congestion Info
+    /// On the server, updates the congestion info stored that will be
+    /// sent to clients in MC_CONGESTION_INFO frames
     fn update_congestion_info(&mut self, fc_channels: Vec<&FlexicastChannelSource>);
 
     /// Gets the congestion window of the multicast source.

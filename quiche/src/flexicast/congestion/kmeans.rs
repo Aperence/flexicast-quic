@@ -1,3 +1,4 @@
+//! Kmeans congestion control algorithm
 use crate::flexicast::FlexicastAttributes;
 
 use super::FcCongestionHeuristicOps;

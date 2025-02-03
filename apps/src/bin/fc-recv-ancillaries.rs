@@ -694,13 +694,15 @@ impl ChannelState{
 
 #[derive(Debug)]
 struct Channels{
-    channels: Vec<ChannelState>
+    channels: Vec<ChannelState>,
+    changing_cid: Option<Vec<u8>>
 }
 
 impl Channels {
     fn new() -> Channels{
         Channels{
-            channels: vec![]
+            channels: vec![],
+            changing_cid: None
         }
     }
 
@@ -743,7 +745,12 @@ fn check_migrate(args: &Args, conn: &mut Connection, mc_states: &mut Channels, s
         return None;
     }
     let multicast = conn.get_flexicast_attributes_mut()?;
-    let channel_id = multicast.should_change_channel()?;
+
+    if let None = mc_states.changing_cid{
+        mc_states.changing_cid = multicast.should_change_channel();
+    }
+
+    let channel_id = mc_states.changing_cid.as_ref()?;
 
     info!("Should change to channel {:?}", channel_id);
 
@@ -756,6 +763,7 @@ fn check_migrate(args: &Args, conn: &mut Connection, mc_states: &mut Channels, s
         // rest of pipeline (provide cid, probe path, join group, ...)
         // will be handled in the loop
         mc_states.join_channel(new_idx, announce_data);
+        mc_states.changing_cid = None;
     }else if !mc_states.channels.is_empty() && mc_states.channels[0].lifetime == ChannelLifetime::Joined{
         conn.mc_leave_channel().unwrap();
         conn.abandon_path(mc_states.channels[0].bind_addr, server_addr, 0).unwrap();

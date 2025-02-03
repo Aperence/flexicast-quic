@@ -4,14 +4,12 @@ use std::convert::TryFrom;
 use std::convert::TryInto;
 use std::io::BufRead;
 use std::net::SocketAddr;
-use std::path;
 use std::time;
 
 use crate::packet::Epoch;
 use crate::rand::rand_bytes;
 use crate::ranges;
 use crate::ranges::RangeSet;
-use crate::recovery::flexicast;
 use crate::CongestionControlAlgorithm;
 use crate::SendInfo;
 use congestion::FcCongestionState;
