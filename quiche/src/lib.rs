@@ -384,8 +384,9 @@ extern crate log;
 
 use ancillaries::Ancillary;
 use cid::PathIdIter;
-use flexicast::congestion::FcCongestionConf;
-use flexicast::congestion::FcCongestionHeuristic;
+use flexicast::congestion::config::FcCongestionConf;
+use flexicast::congestion::config::FcCongestionHeuristic;
+use flexicast::congestion::config::FcEXP3Rewarder;
 use flexicast::congestion::FlexicastCongestionConnection;
 use flexicast::FcError;
 use flexicast::FlexicastAttributes;
@@ -858,6 +859,7 @@ pub struct Config {
 
     fc_congestion_info_delay: Duration,
     fc_congestion_heuristic: FcCongestionHeuristic,
+    fc_exp3_rewarder: FcEXP3Rewarder,
 }
 
 // See https://quicwg.org/base-drafts/rfc9000.html#section-15
@@ -929,6 +931,7 @@ impl Config {
 
             fc_congestion_info_delay: Duration::from_millis(100),
             fc_congestion_heuristic: FcCongestionHeuristic::EXP3,
+            fc_exp3_rewarder: FcEXP3Rewarder::LOSS
         })
     }
 

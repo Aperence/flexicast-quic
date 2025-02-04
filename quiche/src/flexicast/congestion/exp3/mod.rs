@@ -3,8 +3,9 @@ use std::{collections::HashMap, fmt::Display, time::{Duration, Instant}};
 
 use crate::flexicast::{FlexicastAttributes, McAnnounceData};
 
-use super::{FcCongestionConf, FcCongestionHeuristicOps};
+use super::{stats::CongestionStats, FcCongestionConf, FcCongestionHeuristicOps};
 use exp3::EXP3;
+use rewarder::{EXP3Rewarder, LOSS_REWARDER, TAU};
 
 static GAMMA: f64 = 0.15;
 type CID = Vec<u8>;
@@ -18,6 +19,7 @@ pub static EXP3_HEURISTIC: FcCongestionHeuristicOps = FcCongestionHeuristicOps {
 fn exp3_should_change_channel(flexicast: &mut FlexicastAttributes) -> Option<Vec<u8>> {
     let announce_data = &flexicast.mc_announce_data;
     let current_channel_cid = flexicast.get_mc_announce_data_active().unwrap().channel_id.clone();
+    let congestion_stats = flexicast.congestion_state.statistics.clone();
     let exp3_state = &mut flexicast.congestion_state.exp3_state;
 
     let now = Instant::now();
@@ -30,7 +32,7 @@ fn exp3_should_change_channel(flexicast: &mut FlexicastAttributes) -> Option<Vec
         println!("State:\n{}", exp3_state);
 
         if let Some(previous_cid) = &exp3_state.previous_channel{
-            let reward = exp3_state.reward();
+            let reward = (exp3_state.rewarder.reward)(&congestion_stats);
             exp3_state.instances
                 .entry(previous_cid.clone())
                 .and_modify(|e| {
@@ -38,7 +40,7 @@ fn exp3_should_change_channel(flexicast: &mut FlexicastAttributes) -> Option<Vec
                 });
         }
 
-        let banned = exp3_state.get_banned();
+        let banned = exp3_state.get_banned(&congestion_stats);
 
         let exp3_instance = exp3_state.instances.get_mut(&current_channel_cid)
             .expect("Should have an instance for the current channel");
@@ -96,12 +98,15 @@ pub struct EXP3State{
     instances: HashMap<CID, EXP3>,
     last_taken_action: Instant,
     ordered_channels: Vec<CID>,
-    previous_channel: Option<CID>
+    previous_channel: Option<CID>,
+    rewarder: &'static EXP3Rewarder
 }
 
 impl EXP3State {
-    pub(crate) fn new(_config: &FcCongestionConf) -> Self{
-        Self::default()
+    pub(crate) fn new(config: &FcCongestionConf) -> Self{
+        let mut state = Self::default();
+        state.rewarder = config.exp3_rewarder;
+        state
     }
 
     fn update_instances(&mut self, announce_data: &Vec<McAnnounceData>){
@@ -124,12 +129,15 @@ impl EXP3State {
         now > self.last_taken_action + Duration::from_secs(5)
     }
 
-    fn reward(&self) -> f64{
-        0.0
-    }
-
-    fn get_banned(&self) -> Vec<usize>{
-        vec![]
+    fn get_banned(&self, stats: &CongestionStats) -> Vec<usize>{
+        let banned = if stats.loss_rate < 0.01{
+            vec![Action::Decrease]
+        }else if stats.loss_rate > 2.0 * TAU{
+            vec![Action::Stay, Action::Increase]
+        }else{
+            vec![]
+        };
+        banned.into_iter().map(|action| action.into()).collect()
     }
 }
 
@@ -153,8 +161,10 @@ impl Default for EXP3State{
             last_taken_action: Instant::now(),
             ordered_channels: vec![],
             previous_channel: None,
+            rewarder: &LOSS_REWARDER
         }
     }
 }
 
 pub mod exp3;
+pub mod rewarder;

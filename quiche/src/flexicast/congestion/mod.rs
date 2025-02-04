@@ -1,9 +1,10 @@
 //! Handles the congestion control for multicast
 use std::time::{self, Duration, Instant};
-use exp3::{EXP3State, EXP3_HEURISTIC};
-use probe::ProbeState;
+use config::FcCongestionConf;
+use exp3::EXP3State;
+use stats::CongestionStats;
 
-use crate::{ancillaries::{Ancillary, ECNValue}, Config, Connection};
+use crate::{ancillaries::{Ancillary, ECNValue}, Connection};
 
 use super::{FlexicastAttributes, FlexicastChannelSource, McRole};
 
@@ -13,29 +14,6 @@ const MAX_DELAY_MULTIPLIER: u32 = 16;
 /// the channel it is listening to, in reaction to congestion.
 pub struct FcCongestionHeuristicOps {
     should_change_channel: fn(flexicast: &mut FlexicastAttributes) -> Option<Vec<u8>>
-}
-
-/// Heuristict used by Flexicast for automatic group migration
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[repr(C)]
-pub enum FcCongestionHeuristic {
-    /// Use EXP3 to drive which group to join
-    EXP3       = 0,
-    /// Join the group with closest rate
-    KMEANS     = 1,
-    /// Incrementally join groups with higher rates, if no congestion signal
-    /// are detected
-    PROBE      = 2,
-}
-
-impl From<FcCongestionHeuristic> for &'static FcCongestionHeuristicOps {
-    fn from(heuristic: FcCongestionHeuristic) -> Self {
-        match heuristic {
-            FcCongestionHeuristic::KMEANS => &kmeans::KMEANS,
-            FcCongestionHeuristic::PROBE => &probe::PROBE,
-            FcCongestionHeuristic::EXP3 => &exp3::EXP3_HEURISTIC,
-        }
-    }
 }
 
 pub(crate) struct FcCongestionState{
@@ -49,12 +27,10 @@ pub(crate) struct FcCongestionState{
 
     last_migration: time::Instant,
 
-    pub(crate) probe_state: probe::ProbeState,
     pub(crate) exp3_state: exp3::EXP3State,
 
     curr_channel_idx: usize,
-    lost_count: usize,
-    recv_count: usize,
+    statistics: CongestionStats
 }
 
 impl Default for FcCongestionState{
@@ -68,10 +44,8 @@ impl Default for FcCongestionState{
             received_congestion_info: None,
             mc_congestion_scheduler: &exp3::EXP3_HEURISTIC,
             last_migration: Instant::now(),
-            probe_state: ProbeState::default(),
             exp3_state: EXP3State::default(),
-            lost_count: 0,
-            recv_count: 0,
+            statistics: CongestionStats::default(),
             curr_channel_idx: 0,
         }
     }
@@ -87,10 +61,8 @@ impl FcCongestionState{
             received_congestion_info: None,
             mc_congestion_scheduler: config.cc_heuristic,
             last_migration: Instant::now(),
-            probe_state: ProbeState::new(config),
             exp3_state: EXP3State::new(config),
-            lost_count: 0,
-            recv_count: 0,
+            statistics: CongestionStats::default(),
             curr_channel_idx: 0,
         }
     }
@@ -121,17 +93,17 @@ impl FcCongestionState{
     }
 
     pub(crate) fn update_recv(&mut self, recv_count: usize){
-        println!("Updating recv, curr={}, new={}", self.recv_count, recv_count);
-        let new_recv = recv_count - self.recv_count;
-        self.recv_count = recv_count;
-        self.probe_state.packets_recv(new_recv);
+        println!("Updating recv, curr={}, new={}", self.statistics.recv_count, recv_count);
+        for _ in 0..(recv_count - self.statistics.recv_count){
+            self.statistics.on_received();
+        }
     }
 
     pub(crate) fn update_loss(&mut self, lost_count: usize){
-        println!("Updating loss, curr={}, new={}", self.lost_count, lost_count);
-        let new_loss = lost_count - self.lost_count;
-        self.lost_count = lost_count;
-        self.probe_state.packets_lost(new_loss);
+        println!("Updating loss, curr={}, new={}", self.statistics.lost_count, lost_count);
+        for _ in 0..(lost_count - self.statistics.lost_count){
+            self.statistics.on_loss();
+        }
     }
 
     pub(crate) fn update_ancillaries(&mut self, ancillaries: Vec<Ancillary>){
@@ -141,20 +113,19 @@ impl FcCongestionState{
                 Ancillary::TTL(_ttl) => (), // use it later
                 Ancillary::ECN(ecnvalue) => {
                     if ecnvalue == ECNValue::CE{
-                        self.probe_state.packet_marked();
+                        self.statistics.on_marked();
                         marked = true;
                     }
                 },
             }
         }
         if !marked{
-            self.probe_state.packet_not_marked();
+            self.statistics.on_not_marked();
         }
     }
 
     fn reset(&mut self){
-        self.recv_count = 0;
-        self.lost_count = 0;
+        self.statistics = CongestionStats::default()
     }
 }
 
@@ -300,22 +271,6 @@ pub struct FcCongestionInfo{
     pub rtt: Duration
 }
 
-/// Config of the congestion control for Flexicast
-pub struct FcCongestionConf {
-    congestion_info_delay: Duration,
-    cc_heuristic: &'static FcCongestionHeuristicOps,
-}
-
-impl FcCongestionConf{
-
-    pub(crate) fn from_config(config: &Config) -> Self{
-        FcCongestionConf{
-            congestion_info_delay: config.fc_congestion_info_delay,
-            cc_heuristic: config.fc_congestion_heuristic.into()
-        }
-    }
-}
-
 bitflags::bitflags! {
     /// Different quality of services associated with multicast groups
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,6 +286,6 @@ bitflags::bitflags! {
 
 
 mod kmeans;
-mod probe;
 mod exp3;
+mod stats;
 pub mod config;
