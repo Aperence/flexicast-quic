@@ -8,6 +8,7 @@ use exp3::EXP3;
 use rewarder::{EXP3Rewarder, LOSS_REWARDER, TAU};
 
 static GAMMA: f64 = 0.15;
+
 type CID = Vec<u8>;
 
 /// Join groups depending on an EXP3 heuristic
@@ -17,17 +18,23 @@ pub static EXP3_HEURISTIC: FcCongestionHeuristicOps = FcCongestionHeuristicOps {
 };
 
 fn exp3_should_change_channel(flexicast: &mut FlexicastAttributes) -> Option<Vec<u8>> {
+    let now = Instant::now();
+
     let announce_data = &flexicast.mc_announce_data;
-    let current_channel_cid = flexicast.get_mc_announce_data_active().unwrap().channel_id.clone();
-    let congestion_stats = flexicast.congestion_state.statistics.clone();
+    let current_channel = flexicast.get_mc_announce_data_active().unwrap().clone();
+
+    // first update the throughput in the window
+    let congestion_stats = &mut flexicast.congestion_state.statistics;
+    congestion_stats.update_window(now, current_channel.bitrate.expect("EXP3 expects a fixed bitrate"));
+    let congestion_stats = congestion_stats.clone();
     let exp3_state = &mut flexicast.congestion_state.exp3_state;
 
-    let now = Instant::now();
+
     if exp3_state.wait_timeout_elapsed(now){
         exp3_state.last_taken_action = now;
 
         exp3_state.update_instances(announce_data);
-        let current_channel_idx = exp3_state.ordered_channels.iter().position(|c| c == &current_channel_cid).unwrap();
+        let current_channel_idx = exp3_state.ordered_channels.iter().position(|c| c == &current_channel.channel_id).unwrap();
 
         println!("State:\n{}", exp3_state);
 
@@ -42,14 +49,14 @@ fn exp3_should_change_channel(flexicast: &mut FlexicastAttributes) -> Option<Vec
 
         let banned = exp3_state.get_banned(&congestion_stats);
 
-        let exp3_instance = exp3_state.instances.get_mut(&current_channel_cid)
+        let exp3_instance = exp3_state.instances.get_mut(&current_channel.channel_id)
             .expect("Should have an instance for the current channel");
 
         println!("Taking action for channel {}", current_channel_idx);
         let action: Action = exp3_instance.take_action(banned).expect("Failed to take action").into();
         println!("Action is: {:?}", action);
 
-        exp3_state.previous_channel = Some(current_channel_cid.clone());
+        exp3_state.previous_channel = Some(current_channel.channel_id);
 
         let new_channel = match action{
             Action::Increase if current_channel_idx < exp3_state.ordered_channels.len() => {
@@ -126,7 +133,7 @@ impl EXP3State {
     }
 
     fn wait_timeout_elapsed(&self, now: Instant) -> bool{
-        now > self.last_taken_action + Duration::from_secs(5)
+        now > self.last_taken_action + Duration::from_secs(1)
     }
 
     fn get_banned(&self, stats: &CongestionStats) -> Vec<usize>{
@@ -161,7 +168,7 @@ impl Default for EXP3State{
             last_taken_action: Instant::now(),
             ordered_channels: vec![],
             previous_channel: None,
-            rewarder: &LOSS_REWARDER
+            rewarder: &LOSS_REWARDER,
         }
     }
 }

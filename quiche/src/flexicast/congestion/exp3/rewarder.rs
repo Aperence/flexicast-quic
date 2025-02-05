@@ -15,7 +15,9 @@ fn sigmoid(x: f64, k: f64) -> f64{
 }
 
 pub static LOSS_REWARDER: EXP3Rewarder = EXP3Rewarder{
-    reward: |congestion_state| {
-        (1.0 - sigmoid(congestion_state.loss_rate - TAU, K)) / sigmoid(TAU, K)
+    reward: |congestion_stats| {
+        let scaled = congestion_stats.throughput as f64 / congestion_stats.max_throughput() as f64;
+        let regret = (1.0 - sigmoid(congestion_stats.loss_rate - TAU, K)) / sigmoid(TAU, K);
+        scaled * regret
     }
 };

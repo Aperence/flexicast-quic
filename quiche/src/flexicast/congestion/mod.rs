@@ -288,4 +288,5 @@ bitflags::bitflags! {
 mod kmeans;
 mod exp3;
 mod stats;
+mod window;
 pub mod config;
