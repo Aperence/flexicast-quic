@@ -59,7 +59,7 @@ fn exp3_should_change_channel(flexicast: &mut FlexicastAttributes) -> Option<Vec
         exp3_state.previous_channel = Some(current_channel.channel_id);
 
         let new_channel = match action{
-            Action::Increase if current_channel_idx < exp3_state.ordered_channels.len() => {
+            Action::Increase if current_channel_idx < exp3_state.ordered_channels.len() - 1 => {
                 Some(exp3_state.ordered_channels[current_channel_idx + 1].clone())
             },
             Action::Decrease if current_channel_idx > 0 => {
