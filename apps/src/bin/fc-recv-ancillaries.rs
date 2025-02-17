@@ -339,7 +339,8 @@ fn main() {
                 // initialize mc_states
                 if let Some(announce_data) = flexicast.get_mc_announce_data(args.idx_fc_chan){
                     let mut channels = Channels::new(args.migration_log.clone()); // use logs
-                    channels.join_channel(args.idx_fc_chan, &announce_data);
+                    channels.join_channel(args.idx_fc_chan, announce_data);
+                    channels.initial_channel_joined(args.idx_fc_chan, announce_data);
                     mc_states = Some(channels);
                 }
             }
@@ -728,6 +729,12 @@ impl Channels {
         }
     }
 
+    fn initial_channel_joined(&mut self, index: usize, announce_data: &McAnnounceData){
+        if let Some(file) = &mut self.migration_log{
+            file.write(format!("{},{},{}\n", index, announce_data.bitrate.unwrap(), 0).as_bytes()).expect("Failed to write");
+        }
+    }
+
     fn join_channel(&mut self, channel_idx: usize, announce_data: &McAnnounceData){
         let bind_addr: SocketAddr = format!("0.0.0.0:{}", announce_data.udp_port).parse().unwrap();
         let group_addr: SocketAddr = SocketAddr::V4(SocketAddrV4::new(
@@ -804,7 +811,7 @@ fn check_migrate(args: &Args, conn: &mut Connection, mc_states: &mut Channels, s
             mc_states.count_frames = mc_states.count_frames + new_frames_count;
             mc_states.recv = 0;
 
-            file.write(format!("{},{},{}", curr_idx, curr_bitrate, mc_states.count_frames).as_bytes()).expect("Failed to write");
+            file.write(format!("{},{},{}\n", curr_idx, curr_bitrate, mc_states.count_frames).as_bytes()).expect("Failed to write");
         }
     }
     return None;
