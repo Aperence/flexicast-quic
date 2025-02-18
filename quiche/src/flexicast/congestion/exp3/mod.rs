@@ -36,6 +36,14 @@ fn exp3_should_change_channel(flexicast: &mut FlexicastAttributes) -> Option<Vec
         exp3_state.update_instances(announce_data);
         let current_channel_idx = exp3_state.ordered_channels.iter().position(|c| c == &current_channel.channel_id).unwrap();
 
+        // DUMMY test: remove after
+        if current_channel_idx == 0{
+            return Some(exp3_state.ordered_channels[1].clone());
+        }else{
+            //return Some(exp3_state.ordered_channels[0].clone());
+            return None
+        }
+        /*
         println!("State:\n{}", exp3_state);
 
         if let Some(previous_cid) = &exp3_state.previous_channel{
@@ -67,7 +75,8 @@ fn exp3_should_change_channel(flexicast: &mut FlexicastAttributes) -> Option<Vec
             },
             _ => None,
         };
-        return new_channel;
+        println!("New channel is {:?}", new_channel);
+        return new_channel;*/
     }
     None
 }
@@ -133,7 +142,7 @@ impl EXP3State {
     }
 
     fn wait_timeout_elapsed(&self, now: Instant) -> bool{
-        now > self.last_taken_action + Duration::from_secs(1)
+        now > self.last_taken_action + Duration::from_secs(5)
     }
 
     fn get_banned(&self, stats: &CongestionStats) -> Vec<usize>{

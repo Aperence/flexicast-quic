@@ -794,10 +794,8 @@ fn check_migrate(args: &Args, conn: &mut Connection, mc_states: &mut Channels, s
         mc_states.join_channel(new_idx, announce_data);
         mc_states.changing_cid = None;
     }else if !mc_states.channels.is_empty() && mc_states.channels[0].lifetime == ChannelLifetime::Joined{
-        let curr_idx = multicast.get_mc_announce_data_index(
-            &multicast.get_mc_announce_data_active().unwrap().channel_id
-        ).unwrap();
         let curr_bitrate = multicast.get_mc_announce_data_active().unwrap().bitrate.expect("Only use channels with fixed bitrates");
+        let new_bitrate = announce_data.bitrate.unwrap();
         conn.mc_leave_channel().unwrap();
         conn.abandon_path(mc_states.channels[0].bind_addr, server_addr, 0).unwrap();
         mc_states.leave_channel(mc_states.channels[0].fc_chan_idx);
@@ -806,12 +804,12 @@ fn check_migrate(args: &Args, conn: &mut Connection, mc_states: &mut Channels, s
             let fps = 30;
             // Simplifying assumption: all frames have same size (not case in reality)
             let frame_size = curr_bitrate / fps;
-    
+
             let new_frames_count = mc_states.recv / frame_size;
             mc_states.count_frames = mc_states.count_frames + new_frames_count;
             mc_states.recv = 0;
 
-            file.write(format!("{},{},{}\n", curr_idx, curr_bitrate, mc_states.count_frames).as_bytes()).expect("Failed to write");
+            file.write(format!("{},{},{}\n", new_idx, new_bitrate, mc_states.count_frames).as_bytes()).expect("Failed to write");
         }
     }
     return None;

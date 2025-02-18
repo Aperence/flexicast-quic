@@ -278,9 +278,9 @@ fn main() {
             .min()
             .copied();
 
-        timeout = timeout.or(Some(Duration::from_millis(100)));
+        //timeout = timeout.or(Some(Duration::from_millis(100)));
 
-        debug!("TIMEOUT: {:?}", timeout);
+        //debug!("TIMEOUT: {:?}", timeout);
 
         poll.poll(&mut events, timeout).unwrap();
 
@@ -629,7 +629,7 @@ fn main() {
                             .stream_send(stream_id, &app_data, true)
                         {
                             Ok(v) => v,
-                            Err(quiche::Error::Done) => break 'app_data,
+                            Err(quiche::Error::Done) => { debug!("Can't send on stream currently"); break 'app_data},
                             Err(e) => panic!("Other error: {:?}", e),
                         };
 
@@ -870,7 +870,7 @@ fn get_config(args: &Args) -> quiche::Config {
     config.set_enable_flexicast(args.flexicast);
     config.set_initial_max_path_id(10);
 
-    config.set_fc_congestion_info_delay(Duration::from_millis(100));
+    config.set_fc_congestion_info_delay(Duration::from_secs(60 * 60 * 24 * 365)); // don't use congestion info
 
     config
 }
