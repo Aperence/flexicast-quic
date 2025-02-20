@@ -803,7 +803,8 @@ fn check_migrate(args: &Args, conn: &mut Connection, mc_states: &mut Channels, s
         if let Some(file) = &mut mc_states.migration_log{
             let fps = 30;
             // Simplifying assumption: all frames have same size (not case in reality)
-            let frame_size = curr_bitrate / fps;
+            let byterate =  curr_bitrate / 8;
+            let frame_size = byterate / fps; 
 
             let new_frames_count = mc_states.recv / frame_size;
             mc_states.count_frames = mc_states.count_frames + new_frames_count;
