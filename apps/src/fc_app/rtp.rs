@@ -1,5 +1,7 @@
 use mio::net::UdpSocket;
 use std::collections::VecDeque;
+use std::convert::TryInto;
+use std::fs::File;
 use std::io;
 use std::io::Write;
 use std::net::SocketAddr;
@@ -115,12 +117,15 @@ pub struct RtpServer {
 
     stop_msg: Vec<u8>,
     is_stopped: bool,
+
+    logger: Option<File>,
+    frame_count: u64,
 }
 
 impl RtpServer {
     pub fn new(
         bind_addr: std::net::SocketAddr, to_quic_filename: &str,
-        to_wire_filename: &str, stop_msg: &str,
+        to_wire_filename: &str, stop_msg: &str, logger_path: Option<String>
     ) -> io::Result<Self> {
         info!("new RTP server listening for RTP in {}", bind_addr);
         info!("Stop msg in bytes: {:?}", stop_msg.as_bytes());
@@ -140,12 +145,15 @@ impl RtpServer {
 
             stop_msg: stop_msg.as_bytes().to_vec(),
             is_stopped: false,
+
+            logger: Self::get_logger(logger_path),
+            frame_count: 0,
         })
     }
 
     pub async fn new_with_tokio(
         bind_addr: std::net::SocketAddr, to_quic_filename: &str,
-        to_wire_filename: &str, stop_msg: &str,
+        to_wire_filename: &str, stop_msg: &str, logger_path: Option<String>
     ) -> io::Result<Self> {
         info!("new RTP server listening for RTP in {}", bind_addr);
         info!("Stop msg in bytes: {:?}", stop_msg.as_bytes());
@@ -167,10 +175,12 @@ impl RtpServer {
 
             stop_msg: stop_msg.as_bytes().to_vec(),
             is_stopped: false,
+            logger: Self::get_logger(logger_path),
+            frame_count: 0,
         })
     }
 
-    pub fn new_without_socket(stop_msg: &str) -> Self {
+    pub fn new_without_socket(stop_msg: &str, logger_path: Option<String>) -> Self {
         Self {
             socket: SockType::None,
             queued_streams: VecDeque::new(),
@@ -187,6 +197,19 @@ impl RtpServer {
 
             stop_msg: stop_msg.as_bytes().to_vec(),
             is_stopped: false,
+            logger: Self::get_logger(logger_path),
+            frame_count: 0,
+        }
+    }
+
+    fn get_logger(logger_path: Option<String>) -> Option<File>{
+        match logger_path{
+            Some(path) => {
+                let mut file = File::create(path).expect("Failed to create logger");
+                file.write("timestamp,frame_idx\n".as_bytes()).expect("Failed to write header");
+                Some(file)
+            },
+            None => None
         }
     }
 
@@ -288,6 +311,13 @@ impl RtpServer {
             BufType::Size(n) => (n, &self.buf[..n]),
             BufType::Buffer(buff) => (buff.len(), buff),
         };
+        let rtp = RtpHeader::from_bytes(buf[..12].try_into().unwrap());
+        if rtp.payload_type == 96 && rtp.marker{
+            if let Some(logger) = &mut self.logger{
+                logger.write(format!("{},{}\n", rtp.timestamp, self.frame_count).as_bytes()).expect("Failed to write to logger");
+            }
+            self.frame_count += 1;
+        }
         trace!(
             "read {} bytes from RTP socket, enqueue in stream {}",
             n,
@@ -339,5 +369,51 @@ impl RtpServer {
     #[inline]
     pub fn is_source_rtp_stopped(&self) -> bool {
         self.is_stopped
+    }
+}
+
+#[derive(Debug)]
+pub struct RtpHeader{
+    pub version: u8,
+    pub padding: bool,
+    pub extension: bool,
+    pub cc: u8,
+    pub marker: bool,
+    pub payload_type: u8,
+    pub seq: u16,
+    pub timestamp: u32,
+    pub ssrc: u32
+}
+
+impl RtpHeader{
+    pub fn from_bytes(bytes: [u8; 12]) -> Self{
+        // bits 0 & 1
+        let version = bytes[0] & 0xC0 >> 6;
+        // bit 2
+        let padding = bytes[0] & 0x20 != 0;
+        // bit 3
+        let extension = bytes[0] & 0x10 != 0;
+        // bit 4-7
+        let cc = bytes[0] & 0x0F;
+
+        // bit 0
+        let marker = bytes[1] & 0x80 != 0;
+        // bit 1-7
+        let payload_type = bytes[1] & 0x7F;
+        let seq = u16::from_be_bytes(bytes[2..4].try_into().unwrap());
+        let timestamp = u32::from_be_bytes(bytes[4..8].try_into().unwrap());
+        let ssrc = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
+
+        RtpHeader{
+            version,
+            padding,
+            extension,
+            cc,
+            marker,
+            payload_type,
+            seq,
+            timestamp,
+            ssrc
+        }
     }
 }

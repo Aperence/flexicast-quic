@@ -18,8 +18,10 @@ use quiche::ConnectionId;
 use quiche::Error;
 #[cfg(feature = "qlog")]
 use quiche_apps::common::make_qlog_writer;
+use quiche_apps::fc_app::rtp::RtpHeader;
 use ring::rand::SecureRandom;
 use ring::rand::SystemRandom;
+use std::convert::TryInto;
 use std::fs::File;
 use std::io::Write;
 use std::net;
@@ -444,6 +446,7 @@ fn main() {
 
             // We should be able to read the stream until its end.
             let mut total = 0;
+            let mut start = true;
             while let Ok((read, fin)) =
                 conn.stream_recv(stream_id, &mut buf[..])
             {
@@ -454,7 +457,13 @@ fn main() {
                 total += read;
 
                 let channels = mc_states.as_mut().expect("Should have an mc_state at this point");
-                channels.recv += read as u64;
+                if start && channels.max_stream < stream_id{
+                    // get the RTP header and store the timestamp if at start of stream and higher stream id
+                    let rtp = RtpHeader::from_bytes(buf[..12].try_into().unwrap());
+                    channels.max_timestamp = rtp.timestamp;
+                    channels.max_stream = stream_id;
+                }
+                start = false;
 
                 rtp_client.on_sequential_stream_recv(&buf[..read]);
 
@@ -706,8 +715,8 @@ impl ChannelState{
 struct Channels{
     channels: Vec<ChannelState>,
     changing_cid: Option<Vec<u8>>,
-    recv: u64,
-    count_frames: u64,
+    max_stream: u64,
+    max_timestamp: u32,
     migration_log: Option<File>
 }
 
@@ -715,7 +724,7 @@ impl Channels {
     fn new(log: Option<String>) -> Channels{
         let migration_log = if let Some(filename) = log{
             let mut migrations = File::create(filename).expect("Failed to create file");
-            migrations.write_all("group,rate,frame_idx\n".as_bytes()).expect("Failed to log");
+            migrations.write_all("group,rate,timestamp\n".as_bytes()).expect("Failed to log");
             Some(migrations)
         }else{
             None
@@ -723,8 +732,8 @@ impl Channels {
         Channels{
             channels: vec![],
             changing_cid: None,
-            recv: 0,
-            count_frames: 0,
+            max_stream: 0,
+            max_timestamp: 0,
             migration_log
         }
     }
@@ -794,23 +803,17 @@ fn check_migrate(args: &Args, conn: &mut Connection, mc_states: &mut Channels, s
         mc_states.join_channel(new_idx, announce_data);
         mc_states.changing_cid = None;
     }else if !mc_states.channels.is_empty() && mc_states.channels[0].lifetime == ChannelLifetime::Joined{
-        let curr_bitrate = multicast.get_mc_announce_data_active().unwrap().bitrate.expect("Only use channels with fixed bitrates");
         let new_bitrate = announce_data.bitrate.unwrap();
         conn.mc_leave_channel().unwrap();
         conn.abandon_path(mc_states.channels[0].bind_addr, server_addr, 0).unwrap();
         mc_states.leave_channel(mc_states.channels[0].fc_chan_idx);
 
         if let Some(file) = &mut mc_states.migration_log{
-            let fps = 30;
-            // Simplifying assumption: all frames have same size (not case in reality)
-            let frame_size = curr_bitrate / fps;
-
-            let new_frames_count = mc_states.recv / frame_size;
-            mc_states.count_frames = mc_states.count_frames + new_frames_count;
-            mc_states.recv = 0;
-
-            file.write(format!("{},{},{}\n", new_idx, new_bitrate, mc_states.count_frames).as_bytes()).expect("Failed to write");
+            file.write(format!("{},{},{}\n", new_idx, new_bitrate, mc_states.max_timestamp).as_bytes()).expect("Failed to write");
         }
+
+        mc_states.max_timestamp = 0;
+        mc_states.max_stream = 0;
     }
     return None;
 }

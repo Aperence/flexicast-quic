@@ -124,6 +124,10 @@ struct Args {
     #[clap(long = "rtp-addr", value_parser)]
     rtp_src_addr: Vec<SocketAddr>,
 
+    /// Loggers for the RTP source.
+    #[clap(long = "rtp-loggers", value_delimiter = ',', num_args=1..)]
+    rtp_loggers: Option<Vec<String>>,
+
     /// RTP message to indicate the end of the stream.
     #[clap(long = "rtp-stop", value_parser, default_value = "STOP RTP")]
     rtp_stop: String,
@@ -178,6 +182,18 @@ fn main() {
         std::process::exit(1);
     }
 
+    // Sanity check: there are the same number of flexicast instances as RTP
+    // sources, if flexicast is enabled.
+    if args.flexicast &&
+            args
+            .rtp_loggers
+            .as_ref()
+            .is_some_and(|b| b.len() != args.rtp_src_addr.len())
+    {
+        error!("If flexicast is enabled, the number of loggers instances must be the same as the number of RTP sources!");
+        std::process::exit(1);
+    }
+
     // List of all flexicast channels with different bitrates.
     // If no bitrate is provided (i.e., the `bitrates` parameter is not used),
     // creates a single flexicast channel with the classical implemented
@@ -217,12 +233,15 @@ fn main() {
     let mut rtp_servers = args
         .rtp_src_addr
         .iter()
-        .map(|rtp_addr| {
+        .enumerate()
+        .map(|(idx, rtp_addr)| {
+            let logger = args.rtp_loggers.as_ref().map(|loggers| loggers[idx].clone());
             RtpServer::new(
                 *rtp_addr,
                 &args.result_wire_trace,
                 &args.result_wire_trace,
                 &args.rtp_stop,
+                logger
             )
             .unwrap()
         })
