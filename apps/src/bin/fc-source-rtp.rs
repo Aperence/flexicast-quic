@@ -3,6 +3,7 @@ extern crate log;
 
 use std::collections::HashMap;
 use std::net;
+use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::path::Path;
@@ -19,6 +20,7 @@ use quiche::flexicast::McAnnounceData;
 use quiche::flexicast::McConfig;
 use quiche::flexicast::McRole;
 use quiche::flexicast::FcConfig;
+use quiche::Connection;
 #[cfg(feature = "qlog")]
 use quiche_apps::common::make_qlog_writer;
 use quiche_apps::common::ClientIdMap;
@@ -34,7 +36,8 @@ const RTP_SOCKET_TOKEN_START: usize = 1;
 struct Client {
     conn: quiche::Connection,
     client_id: u64,
-    listen_fc_channel: bool,
+    current_channel_idx: Option<usize>,
+
 }
 
 type ClientMap = HashMap<u64, Client>;
@@ -145,8 +148,6 @@ fn main() {
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
     let args = Args::parse();
-
-    let mut nb_active_fc_clients = None;
 
     // Setup the event loop.
     let mut poll = mio::Poll::new().unwrap();
@@ -266,6 +267,8 @@ fn main() {
         std::time::Duration::from_millis(args.expiration_timer) * 5;
     let mut start_rtp_timer: Option<std::time::Instant> = None;
     let mut can_close_conn_after_rtp = false;
+
+    let mut first_receiver_joined = false;
 
     loop {
         // Find the shorter timeout from all the active connections.
@@ -476,7 +479,7 @@ fn main() {
                 let client = Client {
                     conn,
                     client_id,
-                    listen_fc_channel: false,
+                    current_channel_idx: None,
                 };
 
                 next_client_id += 1;
@@ -563,24 +566,10 @@ fn main() {
                 },
             };
 
-            // Sets the client listens to the flexicast channel.
-            if !client.listen_fc_channel &&
-                client
-                    .conn
-                    .get_flexicast_attributes()
-                    .map(|mc| {
-                        matches!(
-                            mc.get_mc_role(),
-                            McRole::ServerUnicast(
-                                flexicast::McClientStatus::ListenMcPath(true),
-                            )
-                        )
-                    })
-                    .unwrap_or(false)
-            {
-                client.listen_fc_channel = true;
-                nb_active_fc_clients =
-                    Some(nb_active_fc_clients.unwrap_or(0) + 1);
+            update_receivers_counts(client, &mut fc_channels);
+
+            if fc_channels.iter().any(|chan| chan.number_receivers != 0){
+                first_receiver_joined = true;
             }
 
             handle_path_events(client);
@@ -626,35 +615,10 @@ fn main() {
             let mut send_at_least_once = false;
             for (i, rtp_server) in rtp_servers.iter_mut().enumerate() {
                 if rtp_server.should_send_app_data() {
-                    let (stream_id, app_data) = rtp_server.get_app_data();
                     if let Some(fc_chan) = fc_channels.get_mut(i) {
-                        match fc_chan
-                            .fc_chan
-                            .channel
-                            .stream_priority(stream_id, 0, false)
-                        {
-                            Ok(()) => (),
-                            Err(quiche::Error::StreamLimit) => (),
-                            Err(quiche::Error::Done) => (),
-                            Err(e) => panic!(
-                                "Error while setting stream priority: {:?}",
-                                e
-                            ),
-                        }
-
-                        let written = match fc_chan
-                            .fc_chan
-                            .channel
-                            .stream_send(stream_id, &app_data, true)
-                        {
-                            Ok(v) => v,
-                            Err(quiche::Error::Done) => { debug!("Can't send on stream currently"); break 'app_data},
-                            Err(e) => panic!("Other error: {:?}", e),
-                        };
-
-                        rtp_server.stream_written(written);
+                        //send_at_least_once |= send_rtp_data_stream(rtp_server, fc_chan)
+                        send_at_least_once |= send_rtp_data_datagram(rtp_server, fc_chan)
                     }
-                    send_at_least_once = true;
                 }
             }
             if !send_at_least_once {
@@ -666,6 +630,7 @@ fn main() {
         for fc_chan in fc_channels.iter_mut() {
             let fc_conn = &mut fc_chan.fc_chan;
             let fc_sock = &mut fc_chan.socket;
+            let nb_active_fc_clients = fc_chan.number_receivers;
             'flexicast: loop {
                 let (write, mut send_info) = match fc_conn.mc_send(&mut out) {
                     Ok(v) => v,
@@ -682,7 +647,7 @@ fn main() {
                 // injecting in the multicast network.
                 send_info.to = args.proxy_addr.unwrap_or(fc_conn.mc_send_addr);
 
-                if nb_active_fc_clients >= Some(1) {
+                if nb_active_fc_clients >= 1 {
                     let err = send_to(
                         fc_sock,
                         &out[..write],
@@ -807,9 +772,8 @@ fn main() {
                     c.conn.trace_id(),
                     c.conn.stats(),
                 );
-                if nb_active_fc_clients.is_some() {
-                    nb_active_fc_clients =
-                        Some(nb_active_fc_clients.unwrap() - 1);
+                if let Some(prev) = c.current_channel_idx{
+                    fc_channels[prev].number_receivers -= 1;
                 }
             }
 
@@ -840,11 +804,14 @@ fn main() {
             }
         }
 
+        debug!("Number of receivers:");
+        for fc_chan in &fc_channels{
+            debug!("{}: {}", Ipv4Addr::from(fc_chan.mc_announce_data.group_ip), fc_chan.number_receivers);
+        }
+
         // Stop sending data if all clients left the communication.
-        if let Some(nb) = nb_active_fc_clients {
-            if nb == 0 {
-                break;
-            }
+        if first_receiver_joined && fc_channels.iter().map(|chan| chan.number_receivers).sum::<u64>() == 0 {
+            break;
         }
     }
 }
@@ -888,6 +855,7 @@ fn get_config(args: &Args) -> quiche::Config {
     config.enable_pacing(false);
     config.set_enable_flexicast(args.flexicast);
     config.set_initial_max_path_id(10);
+    config.enable_dgram(true, 10000, 10000);
 
     config.set_fc_congestion_info_delay(Duration::from_secs(60 * 60 * 24 * 365)); // don't use congestion info
 
@@ -898,6 +866,7 @@ struct FcChannelInfo {
     socket: mio::net::UdpSocket,
     fc_chan: FlexicastChannelSource,
     mc_announce_data: McAnnounceData,
+    number_receivers: u64
 }
 
 fn get_multicast_channel(
@@ -993,6 +962,7 @@ fn get_multicast_channel(
         socket,
         fc_chan,
         mc_announce_data,
+        number_receivers: 0
     }
 }
 
@@ -1025,6 +995,7 @@ pub fn get_mc_config(enable_fc: bool, cert_path: &str) -> quiche::Config {
     config.set_initial_max_path_id(10);
     config.set_enable_flexicast(enable_fc);
     config.enable_pacing(false);
+    config.enable_dgram(true, 10000, 10000);
     config.set_cc_algorithm(quiche::CongestionControlAlgorithm::DISABLED);
     config
 }
@@ -1168,4 +1139,90 @@ fn handle_path_events(client: &mut Client) {
             },
         }
     }
+}
+
+// returns true if at least one packet has been sent
+fn send_rtp_data_stream(rtp_server: &mut RtpServer, fc_chan: &mut FcChannelInfo) -> bool{
+    let (stream_id, app_data) = rtp_server.get_app_data();
+    match fc_chan
+        .fc_chan
+        .channel
+        .stream_priority(stream_id, 0, false)
+    {
+        Ok(()) => (),
+        Err(quiche::Error::StreamLimit) => (),
+        Err(quiche::Error::Done) => (),
+        Err(e) => panic!(
+            "Error while setting stream priority: {:?}",
+            e
+        ),
+    }
+
+    let written = match fc_chan
+        .fc_chan
+        .channel
+        .stream_send(stream_id, &app_data, true)
+    {
+        Ok(v) => v,
+        Err(quiche::Error::Done) => { return false; },
+        Err(e) => panic!("Other error: {:?}", e),
+    };
+
+    rtp_server.stream_written(written);
+    true
+}
+
+fn send_rtp_data_datagram(rtp_server: &mut RtpServer, fc_chan: &mut FcChannelInfo) -> bool{
+    let (_, app_data) = rtp_server.get_app_data();
+
+    // if at least 1 receiver, send datagram, otherwise drop packet
+    if fc_chan.number_receivers > 0{
+        match fc_chan
+        .fc_chan
+        .channel
+        .dgram_send(&app_data)
+        {
+            Ok(v) => v,
+            Err(quiche::Error::Done) => {
+                println!("{:?}: Done", rtp_server.socket);
+                return false;
+            },
+            Err(e) => panic!("Other error: {:?}", e),
+        };
+    }
+
+    rtp_server.stream_written(app_data.len());
+    true
+}
+
+fn update_receivers_counts(client: &mut Client, sources: &mut Vec<FcChannelInfo>) -> Option<()>{
+    let flexicast = client.conn.get_flexicast_attributes()?;
+    let curr_channel = flexicast.get_mc_announce_data_active();
+
+    match curr_channel {
+        Some(curr_channel) => {
+            // change of channel, update new channel and prev
+            let curr_channel_idx = flexicast.get_mc_announce_data_index(&curr_channel.channel_id).expect("Should find it");
+
+            if Some(curr_channel_idx) != client.current_channel_idx{
+                let prev_channel_idx = client.current_channel_idx;
+                client.current_channel_idx = Some(curr_channel_idx);
+
+                if let Some(prev) = prev_channel_idx{
+                    sources[prev].number_receivers -= 1;
+                }
+                sources[curr_channel_idx].number_receivers += 1;
+            }
+        }
+        None => {
+            // may have left channel, may need to decrement count
+            if let Some(prev_channel_idx) = client.current_channel_idx{
+                sources[prev_channel_idx].number_receivers -= 1;
+                client.current_channel_idx = None;
+            }
+        }
+    }
+
+
+    Some(())
 }

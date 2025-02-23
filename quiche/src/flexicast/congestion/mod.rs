@@ -93,14 +93,13 @@ impl FcCongestionState{
     }
 
     pub(crate) fn update_recv(&mut self, recv_count: usize){
-        println!("Updating recv, curr={}, new={}", self.statistics.recv_count, recv_count);
         for _ in 0..(recv_count - self.statistics.recv_count){
             self.statistics.on_received();
         }
     }
 
     pub(crate) fn update_loss(&mut self, lost_count: usize){
-        println!("Updating loss, curr={}, new={}", self.statistics.lost_count, lost_count);
+        // TODO: use RTP data to measure loss rate
         for _ in 0..(lost_count - self.statistics.lost_count){
             self.statistics.on_loss();
         }

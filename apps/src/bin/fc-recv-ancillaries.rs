@@ -19,6 +19,7 @@ use quiche::Error;
 #[cfg(feature = "qlog")]
 use quiche_apps::common::make_qlog_writer;
 use quiche_apps::fc_app::rtp::RtpHeader;
+use quiche_apps::fc_app::rtp::RtpLossTracker;
 use ring::rand::SecureRandom;
 use ring::rand::SystemRandom;
 use std::convert::TryInto;
@@ -33,6 +34,7 @@ use std::net::ToSocketAddrs;
 use std::process::Command;
 use std::time;
 use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 
 use quiche_apps::fc_app::rtp::RtpClient;
@@ -256,9 +258,7 @@ fn main() {
                     panic!("recv() failed: {:?}", e);
                 },
             };
-            debug!("Recv from socket unicast");
-
-            println!("Ancillaries = {:?}", ancillaries);
+            debug!("Recv from socket unicast, ancillaries = {:?}", ancillaries);
 
             let recv_info = quiche::RecvInfo {
                 to: socket.local_addr().unwrap(),
@@ -435,43 +435,10 @@ fn main() {
         }
 
         // Process all readable streams.
-        'streams: for stream_id in conn.readable() {
-            if !conn.stream_fully_readable(stream_id) {
-                continue 'streams;
-            }
-
-            if !conn.stream_readable(stream_id) {
-                continue 'streams;
-            }
-
-            // We should be able to read the stream until its end.
-            let mut total = 0;
-            let mut start = true;
-            while let Ok((read, fin)) =
-                conn.stream_recv(stream_id, &mut buf[..])
-            {
-                if start_recv.is_none() {
-                    start_recv = Some(now);
-                }
-
-                total += read;
-
-                let channels = mc_states.as_mut().expect("Should have an mc_state at this point");
-                if start && channels.max_stream < stream_id{
-                    // get the RTP header and store the timestamp if at start of stream and higher stream id
-                    let rtp = RtpHeader::from_bytes(buf[..12].try_into().unwrap());
-                    channels.max_timestamp = rtp.timestamp;
-                    channels.max_stream = stream_id;
-                }
-                start = false;
-
-                rtp_client.on_sequential_stream_recv(&buf[..read]);
-
-                if fin {
-                    let now_st = SystemTime::now();
-                    rtp_client.on_stream_complete(stream_id, now_st, total, None);
-                }
-            }
+        //let recv = process_video_data_stream(&mut conn, &mut mc_states, &mut rtp_client);
+        let recv = process_video_data_datagram(&mut conn, &mut mc_states, &mut rtp_client);
+        if recv && start_recv.is_none() {
+            start_recv = Some(now);
         }
     }
 
@@ -509,6 +476,7 @@ fn get_config(
     config.verify_peer(false);
     config.set_cc_algorithm(quiche::CongestionControlAlgorithm::CUBIC);
     config.set_initial_max_path_id(10);
+    config.enable_dgram(true, 10000, 10000);
 
     if flexicast {
         config.set_initial_max_path_id(10);
@@ -715,6 +683,7 @@ impl ChannelState{
 struct Channels{
     channels: Vec<ChannelState>,
     changing_cid: Option<Vec<u8>>,
+    rtp_loss_tracker: RtpLossTracker,
     max_stream: u64,
     max_timestamp: u32,
     migration_log: Option<File>
@@ -732,6 +701,7 @@ impl Channels {
         Channels{
             channels: vec![],
             changing_cid: None,
+            rtp_loss_tracker: RtpLossTracker::new(),
             max_stream: 0,
             max_timestamp: 0,
             migration_log
@@ -814,6 +784,7 @@ fn check_migrate(args: &Args, conn: &mut Connection, mc_states: &mut Channels, s
 
         mc_states.max_timestamp = 0;
         mc_states.max_stream = 0;
+        mc_states.rtp_loss_tracker.reset();
     }
     return None;
 }
@@ -828,4 +799,74 @@ fn rearm_poll(poll: &mut Poller, unicast: &MsgSocket, multicast: &Option<Channel
             }
         }
     }
+}
+
+// Returns true if any data received
+fn process_video_data_stream(conn: &mut Connection, mc_states: &mut Option<Channels>, rtp_client: &mut RtpClient) -> bool{
+    let mut buf = [0; 65535];
+
+    let mut recv = false;
+    for stream_id in conn.readable() {
+        if !conn.stream_fully_readable(stream_id) {
+            continue;
+        }
+
+        if !conn.stream_readable(stream_id) {
+            continue;
+        }
+
+        // We should be able to read the stream until its end.
+        let mut total = 0;
+        let mut start = true;
+        while let Ok((read, fin)) =
+            conn.stream_recv(stream_id, &mut buf[..])
+        {
+            recv = true;
+
+            total += read;
+
+            let channels = mc_states.as_mut().expect("Should have an mc_state at this point");
+            if start && channels.max_stream < stream_id{
+                // get the RTP header and store the timestamp if at start of stream and higher stream id
+                let rtp = RtpHeader::from_bytes(buf[..12].try_into().unwrap());
+                channels.max_timestamp = rtp.timestamp;
+                channels.max_stream = stream_id;
+            }
+            start = false;
+
+            rtp_client.on_sequential_stream_recv(&buf[..read]);
+
+            if fin {
+                let now_st = SystemTime::now();
+                rtp_client.on_stream_complete(stream_id, now_st, total, None);
+            }
+        }
+    }
+    recv
+}
+
+fn process_video_data_datagram(conn: &mut Connection, mc_states: &mut Option<Channels>, rtp_client: &mut RtpClient) -> bool{
+    let mut buf = [0; 65535];
+
+    let mut recv = false;
+    while let Ok(len) = conn.dgram_recv(&mut buf) {
+        recv = true;
+        debug!("Got {} bytes of DATAGRAM", len);
+
+        let rtp = RtpHeader::from_bytes(buf[..12].try_into().unwrap());
+
+        let channels = mc_states.as_mut().expect("Should have an mc_state at this point");
+        channels.rtp_loss_tracker.on_header_recv(&rtp);
+        if rtp.payload_type == 96{
+            // get the RTP header and store the timestamp if at start of stream and higher stream id
+            channels.max_timestamp = channels.max_timestamp.max(rtp.timestamp);
+        }
+
+        rtp_client.on_sequential_stream_recv(&buf[..len]);
+
+        // let now_st = SystemTime::now();
+        // rtp_client.on_stream_complete(stream_id, now_st, total, None);
+    }
+
+    recv
 }

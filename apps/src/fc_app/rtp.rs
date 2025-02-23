@@ -1,5 +1,5 @@
 use mio::net::UdpSocket;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::convert::TryInto;
 use std::fs::File;
 use std::io;
@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::time;
 use std::time::SystemTime;
 
+#[derive(Debug)]
 pub enum SockType {
     Mio(mio::net::UdpSocket),
     Tokio(tokio::net::UdpSocket),
@@ -71,6 +72,8 @@ impl RtpClient {
                     "RTP Client: error when sending data to UDP sink: {:?}",
                     e
                 );
+            }else{
+                debug!("Sent {:?}", RtpHeader::from_bytes(buf[..12].try_into().unwrap()))
             }
         }
     }
@@ -101,7 +104,7 @@ pub enum BufType<'a> {
 }
 
 pub struct RtpServer {
-    socket: SockType,
+    pub socket: SockType,
     queued_streams: VecDeque<UDPPacketSendingBuf>,
     time_sent_to_quic: Vec<(u64, time::Instant)>,
     time_sent_to_wire: Vec<(u64, time::Instant)>,
@@ -415,5 +418,53 @@ impl RtpHeader{
             timestamp,
             ssrc
         }
+    }
+}
+
+// Track losses by checking if some ranges of sequence number are missing
+// TODO: improve to handle reordering
+#[derive(Debug)]
+pub struct RtpLossTracker{
+    recv: u64,
+    lost: u64,
+    highest: u16
+}
+
+impl RtpLossTracker{
+    pub fn new() -> Self{
+        RtpLossTracker{
+            recv: 0,
+            lost: 0,
+            highest: 0
+        }
+    }
+
+    pub fn on_header_recv(&mut self, header: &RtpHeader){
+        if self.recv == 0{
+            self.highest = header.seq.wrapping_sub(1);
+        }
+
+        let missing = header.seq.wrapping_sub(self.highest) - 1;
+        self.recv += 1;
+        // we lost some seq # and those are after self.highest
+        if missing <= u16::MAX / 2{
+            self.lost += missing as u64;
+        }
+        if self.highest > u16::MAX / 4 * 3 && header.seq < u16::MAX / 4{
+            // wrapping seq #
+            self.highest = header.seq;
+        }else{
+            self.highest = self.highest.max(header.seq);
+        }
+    }
+
+    pub fn reset(&mut self){
+        self.recv = 0;
+        self.highest = 0;
+        self.lost = 0;
+    }
+
+    pub fn loss_rate(&self) -> f64{
+        self.lost as f64 / ((self.lost + self.recv) as f64)
     }
 }
