@@ -33,8 +33,6 @@ use std::net::SocketAddrV4;
 use std::net::ToSocketAddrs;
 use std::process::Command;
 use std::time;
-use std::time::Duration;
-use std::time::Instant;
 use std::time::SystemTime;
 
 use quiche_apps::fc_app::rtp::RtpClient;
@@ -225,8 +223,6 @@ fn main() {
             // timer_change,          // FC Channel change
         ];
         let timeout = timers.iter().flatten().min().copied();
-
-        let timeout = timeout.or(Some(Duration::from_millis(100)));
 
         poll.wait(&mut events, timeout).unwrap();
 

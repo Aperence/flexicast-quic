@@ -444,7 +444,11 @@ impl RtpLossTracker{
             self.highest = header.seq.wrapping_sub(1);
         }
 
-        let missing = header.seq.wrapping_sub(self.highest) - 1;
+        let missing = header.seq.wrapping_sub(self.highest);
+        if missing == 0{
+            return;
+        }
+        let missing = missing - 1;
         self.recv += 1;
         // we lost some seq # and those are after self.highest
         if missing <= u16::MAX / 2{

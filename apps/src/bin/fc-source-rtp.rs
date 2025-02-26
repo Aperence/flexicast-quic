@@ -18,9 +18,7 @@ use quiche::flexicast::FlexicastChannelSource;
 use quiche::flexicast::FlexicastConnection;
 use quiche::flexicast::McAnnounceData;
 use quiche::flexicast::McConfig;
-use quiche::flexicast::McRole;
 use quiche::flexicast::FcConfig;
-use quiche::Connection;
 #[cfg(feature = "qlog")]
 use quiche_apps::common::make_qlog_writer;
 use quiche_apps::common::ClientIdMap;
@@ -635,7 +633,10 @@ fn main() {
                 let (write, mut send_info) = match fc_conn.mc_send(&mut out) {
                     Ok(v) => v,
 
-                    Err(quiche::Error::Done) => break,
+                    Err(quiche::Error::Done) => {
+                        debug!("Mc_send done for {}", Ipv4Addr::from(fc_chan.mc_announce_data.group_ip));
+                        break
+                    },
 
                     Err(e) => {
                         error!("Flexicast out failed: {:?}", e);
@@ -1144,6 +1145,12 @@ fn handle_path_events(client: &mut Client) {
 // returns true if at least one packet has been sent
 fn send_rtp_data_stream(rtp_server: &mut RtpServer, fc_chan: &mut FcChannelInfo) -> bool{
     let (stream_id, app_data) = rtp_server.get_app_data();
+    if fc_chan.number_receivers == 0{
+        // drop packet
+        rtp_server.stream_written(app_data.len());
+        return true;
+    }
+
     match fc_chan
         .fc_chan
         .channel
@@ -1184,7 +1191,7 @@ fn send_rtp_data_datagram(rtp_server: &mut RtpServer, fc_chan: &mut FcChannelInf
         {
             Ok(v) => v,
             Err(quiche::Error::Done) => {
-                println!("{:?}: Done", rtp_server.socket);
+                debug!("{:?}: Done", rtp_server.socket);
                 return false;
             },
             Err(e) => panic!("Other error: {:?}", e),

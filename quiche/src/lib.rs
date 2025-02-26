@@ -4401,6 +4401,8 @@ impl Connection {
             cwnd_available.saturating_sub(left_before_packing_ack_frame - left),
         );
 
+        debug!("CWND {}", cwnd_available);
+
         let mut challenge_data = None;
 
         let active_path = self.paths.get_active_mut()?;
