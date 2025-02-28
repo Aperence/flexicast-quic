@@ -8701,6 +8701,8 @@ impl Connection {
                     if is_app_limited {
                         p.recovery.delivery_rate_update_app_limited(true);
                     }
+
+                    debug!("Received ack range {:?}", ranges);
                     let (lost_packets, lost_bytes, acked_bytes) =
                         p.recovery.on_ack_received(
                             &ranges,
@@ -8740,6 +8742,8 @@ impl Connection {
 
                             // Sanity check: should be the unicast path.
                             if let Some(rfc) = flexicast.fc_reliable.server_mut() {
+                                // TODO: remove this
+                                debug!("Packet acked: {:?}", new_ack_rs);
                                 rfc.mc_ack.on_ack_received(&new_ack_rs);
 
                                 // Also mark the packet as received in the range.
