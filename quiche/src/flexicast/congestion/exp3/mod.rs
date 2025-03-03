@@ -1,7 +1,7 @@
 //! EXP3 congestion control algorithm
 use std::{collections::HashMap, fmt::Display, time::{Duration, Instant}};
 
-use crate::flexicast::{FlexicastAttributes, McAnnounceData};
+use crate::{flexicast::{self, FlexicastAttributes, McAnnounceData}, Connection};
 
 use super::{stats::CongestionStats, FcCongestionConf, FcCongestionHeuristicOps};
 use exp3::EXP3;
@@ -17,7 +17,8 @@ pub static EXP3_HEURISTIC: FcCongestionHeuristicOps = FcCongestionHeuristicOps {
     should_change_channel: exp3_should_change_channel
 };
 
-fn exp3_should_change_channel(flexicast: &mut FlexicastAttributes) -> Option<Vec<u8>> {
+fn exp3_should_change_channel(conn: &mut Connection) -> Option<Vec<u8>> {
+    let flexicast = conn.flexicast.as_mut().unwrap();
     let now = Instant::now();
 
     let announce_data = &flexicast.mc_announce_data;

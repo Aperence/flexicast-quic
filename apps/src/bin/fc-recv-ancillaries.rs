@@ -7,6 +7,7 @@ use polling::Events;
 use polling::Poller;
 use quiche::flexicast;
 use quiche::flexicast::congestion::FlexicastCongestion;
+use quiche::flexicast::congestion::FlexicastCongestionConnection;
 use quiche::flexicast::FcError;
 use quiche::flexicast::FlexicastConnection;
 use quiche::flexicast::McAnnounceData;
@@ -32,8 +33,11 @@ use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::net::ToSocketAddrs;
+use std::num::ParseIntError;
 use std::process::Command;
 use std::time;
+use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 
 use quiche_apps::fc_app::rtp::RtpClient;
@@ -106,6 +110,10 @@ struct Args {
     /// Log frame count at transitions
     #[clap(long)]
     migration_log: Option<String>,
+
+    /// Duration of data reception
+    #[clap(long, value_parser = humantime::parse_duration, default_value = "5s")]
+    listen_duration: Duration,
 }
 
 fn main() {
@@ -212,6 +220,8 @@ fn main() {
         panic!("send() failed: {:?}", e);
     }
 
+    let start = Instant::now();
+
     loop {
         // Compute (FC-)QUIC timeout.
         let now = std::time::Instant::now();
@@ -230,11 +240,20 @@ fn main() {
         );
         */
 
+        if now.duration_since(start) > args.listen_duration{
+            conn.close(false, 0x1, b"fail").ok();
+            break;
+        }
+
+        let elapsed_since_start = now.duration_since(start);
+        let timer_end = args.listen_duration - elapsed_since_start;
+
         let timers = [
             conn.timeout(),        // QUIC timeout
             // conn.mc_timeout(now),  // FC-QUIC timeout
             // conn.rmc_timeout(now), // Reliable FC-QUIC timeout
             // timer_change,          // FC Channel change
+            Some(timer_end),
         ];
         let timeout = timers.iter().flatten().min().copied();
 
@@ -762,13 +781,14 @@ fn check_migrate(args: &Args, conn: &mut Connection, mc_states: &mut Channels, s
     if !args.auto_migration{
         return None;
     }
-    let multicast = conn.get_flexicast_attributes_mut()?;
 
     if let None = mc_states.changing_cid{
-        mc_states.changing_cid = multicast.should_change_channel();
+        mc_states.changing_cid = conn.fc_should_change_channel();
     }
 
     let channel_id = mc_states.changing_cid.as_ref()?;
+    let multicast = conn.get_flexicast_attributes_mut()?;
+
 
     info!("Should change to channel {:?}", channel_id);
 
@@ -875,6 +895,8 @@ fn process_video_data_datagram(conn: &mut Connection, mc_states: &mut Option<Cha
             // get the RTP header and store the timestamp if at start of stream and higher stream id
             channels.max_timestamp = channels.max_timestamp.max(rtp.timestamp);
         }
+
+        conn.update_app_data_loss(channels.rtp_loss_tracker.loss_rate());
 
         rtp_client.on_sequential_stream_recv(&buf[..len]);
 

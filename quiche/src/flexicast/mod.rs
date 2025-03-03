@@ -439,6 +439,7 @@ impl FlexicastAttributes {
                 if is_server =>{
                     // reset reliable structure for new channel
                     self.fc_reliable = ReliableFc::UcPath(RFcUcPath::default());
+                    self.congestion_state.reset();
                     McClientStatus::JoinedNoKey
                 },
             (McClientStatus::Unaware, FcClientAction::Join)

@@ -13,7 +13,7 @@ const MAX_DELAY_MULTIPLIER: u32 = 16;
 /// An heuristic returning whether a multicast client should change
 /// the channel it is listening to, in reaction to congestion.
 pub struct FcCongestionHeuristicOps {
-    should_change_channel: fn(flexicast: &mut FlexicastAttributes) -> Option<Vec<u8>>
+    should_change_channel: fn(conn: &mut Connection) -> Option<Vec<u8>>
 }
 
 pub(crate) struct FcCongestionState{
@@ -29,7 +29,6 @@ pub(crate) struct FcCongestionState{
 
     pub(crate) exp3_state: exp3::EXP3State,
 
-    curr_channel_idx: usize,
     statistics: CongestionStats
 }
 
@@ -45,8 +44,7 @@ impl Default for FcCongestionState{
             mc_congestion_scheduler: &exp3::EXP3_HEURISTIC,
             last_migration: Instant::now(),
             exp3_state: EXP3State::default(),
-            statistics: CongestionStats::default(),
-            curr_channel_idx: 0,
+            statistics: CongestionStats::default()
         }
     }
 }
@@ -63,7 +61,6 @@ impl FcCongestionState{
             last_migration: Instant::now(),
             exp3_state: EXP3State::new(config),
             statistics: CongestionStats::default(),
-            curr_channel_idx: 0,
         }
     }
 
@@ -92,19 +89,6 @@ impl FcCongestionState{
 
     }
 
-    pub(crate) fn update_recv(&mut self, recv_count: usize){
-        for _ in 0..(recv_count - self.statistics.recv_count){
-            self.statistics.on_received();
-        }
-    }
-
-    pub(crate) fn update_loss(&mut self, lost_count: usize){
-        // TODO: use RTP data to measure loss rate
-        for _ in 0..(lost_count - self.statistics.lost_count){
-            self.statistics.on_loss();
-        }
-    }
-
     pub(crate) fn update_ancillaries(&mut self, ancillaries: Vec<Ancillary>){
         let mut marked = false;
         for ancillary in ancillaries{
@@ -123,7 +107,7 @@ impl FcCongestionState{
         }
     }
 
-    fn reset(&mut self){
+    pub fn reset(&mut self){
         self.statistics = CongestionStats::default()
     }
 }
@@ -135,10 +119,6 @@ pub trait FlexicastCongestion {
     /// frame is received by a client
     fn mc_set_congestion_info(&mut self, info: FcCongestionInfo);
 
-    /// Whether a multicast receiver should change of channels
-    /// This function returns a the CID of the new channel to
-    /// join
-    fn should_change_channel(&mut self) -> Option<Vec<u8>>;
 
     /// Whether a server should send a MC_CONGESTION_INFO frame
     /// or not
@@ -150,14 +130,6 @@ impl FlexicastCongestion for FlexicastAttributes{
         self.congestion_state.local_congestion_info = Some(info)
     }
 
-    fn should_change_channel(&mut self) -> Option<Vec<u8>> {
-        if !matches!(self.mc_role, McRole::Client(_)){
-            return None;
-        }
-        let scheduler = self.congestion_state.mc_congestion_scheduler;
-        (scheduler.should_change_channel)(self)
-    }
-
     fn should_send_fc_congestion_info(&self) -> bool{
         self.congestion_state.should_send_congestion_info(Instant::now())
     }
@@ -165,10 +137,15 @@ impl FlexicastCongestion for FlexicastAttributes{
 
 /// Internal congestion control for multicast
 pub trait FlexicastCongestionConnection {
-    /// Update the loss rate of the multicast channel
-    fn mc_update_loss(&mut self) -> Option<()>;
-    /// Update the reception rate of the multicast channel
-    fn mc_update_recv(&mut self) -> Option<()>;
+    /// Whether a multicast receiver should change of channels
+    /// This function returns a the CID of the new channel to
+    /// join
+    fn fc_should_change_channel(&mut self) -> Option<Vec<u8>>;
+
+    /// Updates the flexicast channel loss rate based on loss rate
+    /// measured by the application (typically missing sequence numbers
+    /// for RTP)
+    fn update_app_data_loss(&mut self, loss_rate: f64);
 
     /// On the server, updates the congestion info stored that will be
     /// sent to clients in MC_CONGESTION_INFO frames
@@ -180,44 +157,19 @@ pub trait FlexicastCongestionConnection {
 
 impl FlexicastCongestionConnection for Connection{
 
-    fn mc_update_loss(&mut self) -> Option<()>{
-        let flexicast = self.flexicast.as_mut()?;
-        let space_id = flexicast.get_fc_path_id()? as usize;
-        let path = self.paths.get_mut(space_id).ok()?;
-        let active =
-            flexicast
-            .get_mc_announce_data_index(
-                &flexicast.get_mc_announce_data_active()?.channel_id
-            )?;
-
-        let congestion_state = &mut flexicast.congestion_state;
-        if congestion_state.curr_channel_idx != active{
-            congestion_state.reset();
-            congestion_state.curr_channel_idx = active;
+    fn fc_should_change_channel(&mut self) -> Option<Vec<u8>> {
+        let flexicast = self.flexicast.as_ref()?;
+        if !matches!(flexicast.mc_role, McRole::Client(_)){
+            return None;
         }
-        let lost = path.recovery.lost_count();
-        flexicast.congestion_state.update_loss(lost);
-        None
+        let scheduler = flexicast.congestion_state.mc_congestion_scheduler;
+        (scheduler.should_change_channel)(self)
     }
 
-    fn mc_update_recv(&mut self) -> Option<()>{
-        let flexicast = self.flexicast.as_mut()?;
-        let space_id = flexicast.get_fc_path_id()? as usize;
-        let path = self.paths.get_mut(space_id).ok()?;
-        let recv = path.recv_count;
-        let active =
-        flexicast
-            .get_mc_announce_data_index(
-                &flexicast.get_mc_announce_data_active()?.channel_id
-            )?;
-
-        let congestion_state = &mut flexicast.congestion_state;
-        if congestion_state.curr_channel_idx != active{
-            congestion_state.reset();
-            congestion_state.curr_channel_idx = active;
+    fn update_app_data_loss(&mut self, loss_rate: f64) {
+        if let Some(flexicast) = &mut self.flexicast{
+            flexicast.congestion_state.statistics.set_loss_rate(loss_rate);
         }
-        flexicast.congestion_state.update_recv(recv);
-        None
     }
 
     fn update_congestion_info(&mut self, fc_channels: Vec<&FlexicastChannelSource>) {

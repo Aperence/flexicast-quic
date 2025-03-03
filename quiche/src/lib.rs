@@ -3053,10 +3053,6 @@ impl Connection {
             self.got_peer_conn_id = true;
         }
 
-        // Update multicast congestion state
-        self.mc_update_loss();
-        self.mc_update_recv();
-
         // To avoid sending an ACK in response to an ACK-only packet, we need
         // to keep track of whether this packet contains any frame other than
         // ACK and PADDING.

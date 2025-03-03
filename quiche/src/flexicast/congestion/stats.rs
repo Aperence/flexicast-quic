@@ -6,8 +6,6 @@ static WINDOW_SPAN: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct CongestionStats{
-    pub recv_count: usize,
-    pub lost_count: usize,
     pub loss_rate: f64,
     pub rtt: Duration,
     pub ecn_rate: f64,
@@ -18,8 +16,6 @@ pub struct CongestionStats{
 impl Default for CongestionStats{
     fn default() -> Self {
         Self {
-            recv_count: 0,
-            lost_count: 0,
             loss_rate: 0.0,
             ecn_rate: 0.0,
             rtt: Duration::from_millis(333),
@@ -32,11 +28,6 @@ impl Default for CongestionStats{
 impl CongestionStats{
     const ALPHA: f64 = 0.05;
 
-    pub fn on_loss(&mut self){
-        self.loss_rate = (1.0 - CongestionStats::ALPHA) * self.loss_rate + CongestionStats::ALPHA * 1.0;
-        self.lost_count += 1;
-    }
-
     pub fn on_marked(&mut self){
         self.ecn_rate = (1.0 - CongestionStats::ALPHA) * self.ecn_rate + CongestionStats::ALPHA * 1.0;
     }
@@ -45,14 +36,12 @@ impl CongestionStats{
         self.ecn_rate = (1.0 - CongestionStats::ALPHA) * self.ecn_rate + CongestionStats::ALPHA * 0.0;
     }
 
-    pub fn on_rtt_measured(&mut self, rtt: Duration){
-        self.rtt = rtt;
+    pub fn set_loss_rate(&mut self, loss_rate: f64){
+        self.loss_rate = loss_rate;
     }
 
-    pub fn on_received(&mut self){
-        // no loss
-        self.loss_rate = (1.0 - CongestionStats::ALPHA) * self.loss_rate + CongestionStats::ALPHA * 0.0;
-        self.recv_count += 1;
+    pub fn on_rtt_measured(&mut self, rtt: Duration){
+        self.rtt = rtt;
     }
 
     pub fn update_window(&mut self, now: Instant, bitrate: u64){

@@ -1,5 +1,5 @@
 //! Kmeans congestion control algorithm
-use crate::flexicast::FlexicastAttributes;
+use crate::Connection;
 
 use super::FcCongestionHeuristicOps;
 
@@ -11,7 +11,8 @@ pub static KMEANS: FcCongestionHeuristicOps = FcCongestionHeuristicOps {
     should_change_channel: kmeans_should_change_channel
 };
 
-fn kmeans_should_change_channel(flexicast: &mut FlexicastAttributes) -> Option<Vec<u8>> {
+fn kmeans_should_change_channel(conn: &mut Connection) -> Option<Vec<u8>> {
+    let flexicast = conn.flexicast.as_mut().unwrap();
     if let Some(recv_info) = &flexicast.congestion_state.received_congestion_info{
         let cwnd = recv_info.cwnd;
         let mut closest = recv_info.mc_cwnds.iter().next().unwrap();
