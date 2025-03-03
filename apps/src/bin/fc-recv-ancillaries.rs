@@ -782,19 +782,21 @@ fn check_migrate(args: &Args, conn: &mut Connection, mc_states: &mut Channels, s
         // will be handled in the loop
         mc_states.join_channel(new_idx, announce_data);
         mc_states.changing_cid = None;
-    }else if !mc_states.channels.is_empty() && mc_states.channels[0].lifetime == ChannelLifetime::Joined{
-        let new_bitrate = announce_data.bitrate.unwrap();
-        conn.mc_leave_channel().unwrap();
-        conn.abandon_path(mc_states.channels[0].bind_addr, server_addr, 0).unwrap();
-        mc_states.leave_channel(mc_states.channels[0].fc_chan_idx);
 
+        // log now the migration, as socket is definitively closed
+        let new_bitrate = announce_data.bitrate.unwrap();
         if let Some(file) = &mut mc_states.migration_log{
             file.write(format!("{},{},{}\n", new_idx, new_bitrate, mc_states.max_timestamp).as_bytes()).expect("Failed to write");
         }
 
+        // and reset some metadata collected
         mc_states.max_timestamp = 0;
         mc_states.max_stream = 0;
         mc_states.rtp_loss_tracker.reset();
+    }else if !mc_states.channels.is_empty() && mc_states.channels[0].lifetime == ChannelLifetime::Joined{
+        conn.mc_leave_channel().unwrap();
+        conn.abandon_path(mc_states.channels[0].bind_addr, server_addr, 0).unwrap();
+        mc_states.leave_channel(mc_states.channels[0].fc_chan_idx);
     }
     return None;
 }
@@ -861,13 +863,15 @@ fn process_video_data_datagram(conn: &mut Connection, mc_states: &mut Option<Cha
     let mut recv = false;
     while let Ok(len) = conn.dgram_recv(&mut buf) {
         recv = true;
-        debug!("Got {} bytes of DATAGRAM", len);
 
         let rtp = RtpHeader::from_bytes(buf[..12].try_into().unwrap());
 
         let channels = mc_states.as_mut().expect("Should have an mc_state at this point");
-        channels.rtp_loss_tracker.on_header_recv(&rtp);
+        debug!("Got {} bytes of DATAGRAM, loss rate {}%", len, (channels.rtp_loss_tracker.loss_rate() * 10000.0).round() / 100.0);
+
         if rtp.payload_type == 96{
+            // not rtcp
+            channels.rtp_loss_tracker.on_header_recv(&rtp);
             // get the RTP header and store the timestamp if at start of stream and higher stream id
             channels.max_timestamp = channels.max_timestamp.max(rtp.timestamp);
         }

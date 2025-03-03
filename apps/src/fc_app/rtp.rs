@@ -458,25 +458,27 @@ impl RtpLossTracker{
 
     pub fn on_header_recv(&mut self, header: &RtpHeader){
         if self.recv == 0{
-            self.highest = header.seq.wrapping_sub(1);
+            self.highest = header.seq;
         }
 
         let missing = header.seq.wrapping_sub(self.highest);
-        if missing == 0{
+        if missing > u16::MAX / 2{
+            // probably a retransmission/previous packet considered as lost
             return;
         }
-        let missing = missing - 1;
         self.recv += 1;
-        // we lost some seq # and those are after self.highest
-        if missing <= u16::MAX / 2{
+        if missing != 0{
+            // we lost some seq # and those are after self.highest
             self.lost += missing as u64;
         }
+        let next = header.seq.wrapping_add(1);
         if self.highest > u16::MAX / 4 * 3 && header.seq < u16::MAX / 4{
             // wrapping seq #
-            self.highest = header.seq;
+            self.highest = next;
         }else{
-            self.highest = self.highest.max(header.seq);
+            self.highest = self.highest.max(next);
         }
+
     }
 
     pub fn reset(&mut self){
@@ -495,6 +497,8 @@ mod tests{
     use std::convert::TryInto;
 
     use crate::fc_app::rtp::RtpHeader;
+
+    use super::RtpLossTracker;
 
     #[test]
     fn test_rtp_header(){
@@ -533,5 +537,84 @@ mod tests{
         header.write_bytes(slice.try_into().unwrap());
 
         assert_eq!(out[..12], bytes[..]);
+    }
+
+    fn get_header(seq: u16) -> RtpHeader{
+        RtpHeader {
+            version: 2,
+            padding: false,
+            extension: false,
+            cc: 0,
+            marker: false,
+            payload_type: 96,
+            seq,
+            timestamp: 0,
+            ssrc: 0
+        }
+    }
+
+    #[test]
+    fn test_loss_tracker(){
+        let mut tracker = RtpLossTracker::new();
+
+        tracker.on_header_recv(&get_header(0));
+
+        assert_eq!(tracker.loss_rate(), 0.0);
+
+        tracker.on_header_recv(&get_header(1));
+        assert_eq!(tracker.loss_rate(), 0.0);
+
+        // 2, 3 missing
+        tracker.on_header_recv(&get_header(4));
+        assert_eq!(tracker.loss_rate(), 0.4);
+
+        tracker.on_header_recv(&get_header(3));
+        // we want to keep a small state, so don't maintain state for missing ranges
+        // 3 appear as a previous packet and thus isn't counted in recv/lost
+        assert_eq!(tracker.loss_rate(), 0.4);
+
+        tracker.on_header_recv(&get_header(5));
+        assert_eq!(tracker.loss_rate(), 2.0 / 6.0);
+
+        tracker.on_header_recv(&get_header(36000));
+        // This header is ignored, as supposed retransmission
+        assert_eq!(tracker.loss_rate(), 2.0 / 6.0);
+
+        // lost 6
+        tracker.on_header_recv(&get_header(7));
+        assert_eq!(tracker.loss_rate(), 0.375);
+    }
+
+    #[test]
+    fn test_loss_tracker_not_starting_0(){
+        let mut tracker = RtpLossTracker::new();
+        let start = 16000;
+
+        tracker.on_header_recv(&get_header(start));
+
+        assert_eq!(tracker.loss_rate(), 0.0);
+
+        tracker.on_header_recv(&get_header(start + 1));
+        assert_eq!(tracker.loss_rate(), 0.0);
+
+        // 2, 3 missing
+        tracker.on_header_recv(&get_header(start + 4));
+        assert_eq!(tracker.loss_rate(), 0.4);
+
+        tracker.on_header_recv(&get_header(start + 3));
+        // we want to keep a small state, so don't maintain state for missing ranges
+        // 3 appear as a previous packet and thus isn't counted in recv/lost
+        assert_eq!(tracker.loss_rate(), 0.4);
+
+        tracker.on_header_recv(&get_header(start + 5));
+        assert_eq!(tracker.loss_rate(), 2.0 / 6.0);
+
+        tracker.on_header_recv(&get_header(start + 34000));
+        // This header is ignored, as supposed retransmission
+        assert_eq!(tracker.loss_rate(), 2.0 / 6.0);
+
+        // lost 6
+        tracker.on_header_recv(&get_header(start + 7));
+        assert_eq!(tracker.loss_rate(), 0.375);
     }
 }
