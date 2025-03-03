@@ -5,6 +5,7 @@ use clap::Parser;
 use polling::Event;
 use polling::Events;
 use polling::Poller;
+use quiche::flexicast;
 use quiche::flexicast::congestion::FlexicastCongestion;
 use quiche::flexicast::FcError;
 use quiche::flexicast::FlexicastConnection;
@@ -82,6 +83,10 @@ struct Args {
     /// Address of the RTP sink.
     #[clap(short = 'r', long = "rtp-addr", value_parser)]
     rtp_sink_addr: Option<SocketAddr>,
+
+    /// Address of the RTP sink.
+    #[clap(long = "debug-rtp", value_parser)]
+    debug_rtp: bool,
 
     /// Whether a system call is performed to kill the GStreamer sink when the
     /// connection is closed.
@@ -179,6 +184,15 @@ fn main() {
     // Create the RTP application handler at the client.
     let mut rtp_client =
         RtpClient::new(&args.output_file, args.rtp_sink_addr).unwrap();
+
+    let mut rtp_debug_sinks: Option<Vec<RtpClient>> = None;
+    if args.debug_rtp{
+        rtp_debug_sinks = Some(
+            (0..2).map(|idx|
+                RtpClient::new("", Some(format!("127.0.0.1:{}", 9000 + idx + 1).parse().unwrap())).unwrap()
+            ).collect()
+        )
+    }
 
     info!(
         "connecting to {:} from {:} with scid {}",
@@ -432,7 +446,7 @@ fn main() {
 
         // Process all readable streams.
         //let recv = process_video_data_stream(&mut conn, &mut mc_states, &mut rtp_client);
-        let recv = process_video_data_datagram(&mut conn, &mut mc_states, &mut rtp_client);
+        let recv = process_video_data_datagram(&mut conn, &mut mc_states, &mut rtp_client, &mut rtp_debug_sinks);
         if recv && start_recv.is_none() {
             start_recv = Some(now);
         }
@@ -841,7 +855,7 @@ fn process_video_data_stream(conn: &mut Connection, mc_states: &mut Option<Chann
     recv
 }
 
-fn process_video_data_datagram(conn: &mut Connection, mc_states: &mut Option<Channels>, rtp_client: &mut RtpClient) -> bool{
+fn process_video_data_datagram(conn: &mut Connection, mc_states: &mut Option<Channels>, rtp_client: &mut RtpClient, rtp_debug_sinks: &mut Option<Vec<RtpClient>>) -> bool{
     let mut buf = [0; 65535];
 
     let mut recv = false;
@@ -859,6 +873,13 @@ fn process_video_data_datagram(conn: &mut Connection, mc_states: &mut Option<Cha
         }
 
         rtp_client.on_sequential_stream_recv(&buf[..len]);
+
+        if let Some(rtp_debug_sinks) = rtp_debug_sinks{
+            let idx = mc_states.as_ref().unwrap().channels.get(0).map(|c| c.fc_chan_idx);
+            if let Some(idx) = idx{
+                rtp_debug_sinks[idx].on_sequential_stream_recv(&buf[..len]);
+            }
+        }
 
         // let now_st = SystemTime::now();
         // rtp_client.on_stream_complete(stream_id, now_st, total, None);

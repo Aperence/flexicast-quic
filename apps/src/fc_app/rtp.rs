@@ -1,8 +1,9 @@
+use byteorder::ByteOrder;
 use mio::net::UdpSocket;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::fs::File;
-use std::io;
+use std::{io, u32};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::time;
@@ -314,13 +315,16 @@ impl RtpServer {
             BufType::Size(n) => (n, &self.buf[..n]),
             BufType::Buffer(buff) => (buff.len(), buff),
         };
+
         let rtp = RtpHeader::from_bytes(buf[..12].try_into().unwrap());
+
         if rtp.payload_type == 96 && rtp.marker{
             if let Some(logger) = &mut self.logger{
                 logger.write(format!("{},{}\n", rtp.timestamp, self.frame_count).as_bytes()).expect("Failed to write to logger");
             }
             self.frame_count += 1;
         }
+
         trace!(
             "read {} bytes from RTP socket, enqueue in stream {}",
             n,
@@ -391,7 +395,7 @@ pub struct RtpHeader{
 impl RtpHeader{
     pub fn from_bytes(bytes: [u8; 12]) -> Self{
         // bits 0 & 1
-        let version = bytes[0] & 0xC0 >> 6;
+        let version = (bytes[0] & 0xC0) >> 6;
         // bit 2
         let padding = bytes[0] & 0x20 != 0;
         // bit 3
@@ -418,6 +422,19 @@ impl RtpHeader{
             timestamp,
             ssrc
         }
+    }
+
+    pub fn write_bytes(&self, bytes: &mut [u8; 12]){
+        let padding = if self.padding { 1 } else { 0 };
+        let extension = if self.extension { 1 } else { 0 };
+        let marker = if self.marker { 1 } else { 0 };
+        bytes[0] = self.version << 6 | padding << 5 | extension << 4 | self.cc;
+
+        bytes[1] = marker << 7 | self.payload_type;
+
+        byteorder::BigEndian::write_u16(&mut bytes[2..4], self.seq);
+        byteorder::BigEndian::write_u32(&mut bytes[4..8], self.timestamp);
+        byteorder::BigEndian::write_u32(&mut bytes[8..12], self.ssrc);
     }
 }
 
@@ -470,5 +487,51 @@ impl RtpLossTracker{
 
     pub fn loss_rate(&self) -> f64{
         self.lost as f64 / ((self.lost + self.recv) as f64)
+    }
+}
+
+#[cfg(test)]
+mod tests{
+    use std::convert::TryInto;
+
+    use crate::fc_app::rtp::RtpHeader;
+
+    #[test]
+    fn test_rtp_header(){
+        let bytes: Vec<u8> = vec![
+            0x80,
+            0x60,
+            0x10,
+            0x53,
+            0x31,
+            0x51,
+            0xed,
+            0x1f,
+            0x9d,
+            0x1c,
+            0xbc,
+            0xa4
+        ];
+
+        let slice = bytes[..12].try_into().unwrap();
+
+        let header = RtpHeader::from_bytes(slice);
+
+        assert_eq!(header.version, 2);
+        assert_eq!(header.padding, false);
+        assert_eq!(header.extension, false);
+        assert_eq!(header.cc, 0);
+        assert_eq!(header.marker, false);
+        assert_eq!(header.payload_type, 96);
+        assert_eq!(header.seq, 4179);
+        assert_eq!(header.timestamp, 827452703);
+        assert_eq!(header.ssrc, 2635906212);
+
+        let mut out = [0u8; 2048];
+        let slice = &mut out[..12];
+
+        header.write_bytes(slice.try_into().unwrap());
+
+        assert_eq!(out[..12], bytes[..]);
     }
 }

@@ -40,8 +40,8 @@ fn exp3_should_change_channel(flexicast: &mut FlexicastAttributes) -> Option<Vec
         if current_channel_idx == 0{
             return Some(exp3_state.ordered_channels[1].clone());
         }else{
-            //return Some(exp3_state.ordered_channels[0].clone());
-            return None
+            return Some(exp3_state.ordered_channels[0].clone());
+            //return None
         }
         /*
         println!("State:\n{}", exp3_state);

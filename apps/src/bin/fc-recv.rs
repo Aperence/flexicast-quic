@@ -176,7 +176,7 @@ async fn main() {
     let (tx_app, rx_app) = mpsc::channel(100);
     let mut fc_app =
         FileTransferRecv::new(Path::new(out_filename), rx_app).unwrap();
-    
+
     tokio::spawn(async move {
         fc_app.run().await.unwrap();
     });

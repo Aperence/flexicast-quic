@@ -4401,8 +4401,6 @@ impl Connection {
             cwnd_available.saturating_sub(left_before_packing_ack_frame - left),
         );
 
-        debug!("CWND {}", cwnd_available);
-
         let mut challenge_data = None;
 
         let active_path = self.paths.get_active_mut()?;
@@ -8702,7 +8700,6 @@ impl Connection {
                         p.recovery.delivery_rate_update_app_limited(true);
                     }
 
-                    debug!("Received ack range {:?}", ranges);
                     let (lost_packets, lost_bytes, acked_bytes) =
                         p.recovery.on_ack_received(
                             &ranges,
@@ -8742,8 +8739,6 @@ impl Connection {
 
                             // Sanity check: should be the unicast path.
                             if let Some(rfc) = flexicast.fc_reliable.server_mut() {
-                                // TODO: remove this
-                                debug!("Packet acked: {:?}", new_ack_rs);
                                 rfc.mc_ack.on_ack_received(&new_ack_rs);
 
                                 // Also mark the packet as received in the range.
