@@ -20,6 +20,8 @@ use quiche::ConnectionId;
 use quiche::Error;
 #[cfg(feature = "qlog")]
 use quiche_apps::common::make_qlog_writer;
+use quiche_apps::fc_app::recv_statistics::Migration;
+use quiche_apps::fc_app::recv_statistics::MultiChannelRecvStats;
 use quiche_apps::fc_app::rtp::RtpHeader;
 use quiche_apps::fc_app::rtp::RtpLossTracker;
 use ring::rand::SecureRandom;
@@ -369,7 +371,7 @@ fn main() {
             if mc_states.is_none(){
                 // initialize mc_states
                 if let Some(announce_data) = flexicast.get_mc_announce_data(args.idx_fc_chan){
-                    let mut channels = Channels::new(args.migration_log.clone()); // use logs
+                    let mut channels = Channels::new();
                     channels.join_channel(args.idx_fc_chan, announce_data);
                     channels.initial_channel_joined(args.idx_fc_chan, announce_data);
                     mc_states = Some(channels);
@@ -477,6 +479,10 @@ fn main() {
             .arg("gst-launch")
             .output()
             .expect("Failed to kill GStreamer sink.");
+    }
+
+    if let Some(path) = args.migration_log{
+        mc_states.unwrap().stats.write(&path).unwrap();
     }
 }
 
@@ -715,32 +721,27 @@ struct Channels{
     rtp_loss_tracker: RtpLossTracker,
     max_stream: u64,
     max_timestamp: u32,
-    migration_log: Option<File>
+    stats: MultiChannelRecvStats
 }
 
 impl Channels {
-    fn new(log: Option<String>) -> Channels{
-        let migration_log = if let Some(filename) = log{
-            let mut migrations = File::create(filename).expect("Failed to create file");
-            migrations.write_all("group,rate,timestamp\n".as_bytes()).expect("Failed to log");
-            Some(migrations)
-        }else{
-            None
-        };
+    fn new() -> Channels{
         Channels{
             channels: vec![],
             changing_cid: None,
             rtp_loss_tracker: RtpLossTracker::new(),
             max_stream: 0,
             max_timestamp: 0,
-            migration_log
+            stats: MultiChannelRecvStats::new()
         }
     }
 
     fn initial_channel_joined(&mut self, index: usize, announce_data: &McAnnounceData){
-        if let Some(file) = &mut self.migration_log{
-            file.write(format!("{},{},{}\n", index, announce_data.bitrate.unwrap(), 0).as_bytes()).expect("Failed to write");
-        }
+        self.stats.migrated(Migration{
+            new_channel_idx: index,
+            new_channel_bitrate: announce_data.bitrate.unwrap(),
+            last_recv_timestamp: -1
+        });
     }
 
     fn join_channel(&mut self, channel_idx: usize, announce_data: &McAnnounceData){
@@ -805,9 +806,11 @@ fn check_migrate(args: &Args, conn: &mut Connection, mc_states: &mut Channels, s
 
         // log now the migration, as socket is definitively closed
         let new_bitrate = announce_data.bitrate.unwrap();
-        if let Some(file) = &mut mc_states.migration_log{
-            file.write(format!("{},{},{}\n", new_idx, new_bitrate, mc_states.max_timestamp).as_bytes()).expect("Failed to write");
-        }
+        mc_states.stats.migrated(Migration {
+            new_channel_idx: new_idx,
+            new_channel_bitrate: new_bitrate,
+            last_recv_timestamp: mc_states.max_timestamp as i64
+        });
 
         // and reset some metadata collected
         mc_states.max_timestamp = 0;
@@ -897,6 +900,8 @@ fn process_video_data_datagram(conn: &mut Connection, mc_states: &mut Option<Cha
         }
 
         conn.update_app_data_loss(channels.rtp_loss_tracker.loss_rate());
+        channels.stats.record_loss(rtp.timestamp, channels.rtp_loss_tracker.loss_rate());
+        channels.stats.record_smoothed_loss(rtp.timestamp, channels.rtp_loss_tracker.smoothed_loss_rate());
 
         rtp_client.on_sequential_stream_recv(&buf[..len]);
 

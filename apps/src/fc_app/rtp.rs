@@ -1,8 +1,10 @@
 use byteorder::ByteOrder;
 use mio::net::UdpSocket;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
+use std::fmt::Display;
 use std::fs::File;
+use std::hash::Hash;
 use std::{io, u32};
 use std::io::Write;
 use std::net::SocketAddr;
@@ -14,6 +16,17 @@ pub enum SockType {
     Mio(mio::net::UdpSocket),
     Tokio(tokio::net::UdpSocket),
     None,
+}
+
+impl Display for SockType{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self{
+            SockType::Mio(udp_socket) => write!(f, "{}", udp_socket.local_addr().unwrap()),
+            SockType::Tokio(udp_socket) => write!(f, "{}", udp_socket.local_addr().unwrap()),
+            SockType::None => write!(f, "No socket"),
+        }
+
+    }
 }
 
 impl SockType {
@@ -123,6 +136,7 @@ pub struct RtpServer {
     is_stopped: bool,
 
     logger: Option<File>,
+    timestamp_count: HashMap<u32, usize>,
     frame_count: u64,
 }
 
@@ -151,6 +165,7 @@ impl RtpServer {
             is_stopped: false,
 
             logger: Self::get_logger(logger_path),
+            timestamp_count: HashMap::new(),
             frame_count: 0,
         })
     }
@@ -180,6 +195,7 @@ impl RtpServer {
             stop_msg: stop_msg.as_bytes().to_vec(),
             is_stopped: false,
             logger: Self::get_logger(logger_path),
+            timestamp_count: HashMap::new(),
             frame_count: 0,
         })
     }
@@ -202,6 +218,7 @@ impl RtpServer {
             stop_msg: stop_msg.as_bytes().to_vec(),
             is_stopped: false,
             logger: Self::get_logger(logger_path),
+            timestamp_count: HashMap::new(),
             frame_count: 0,
         }
     }
@@ -210,7 +227,7 @@ impl RtpServer {
         match logger_path{
             Some(path) => {
                 let mut file = File::create(path).expect("Failed to create logger");
-                file.write("timestamp,frame_idx\n".as_bytes()).expect("Failed to write header");
+                file.write("timestamp,frame_idx,number_packets\n".as_bytes()).expect("Failed to write header");
                 Some(file)
             },
             None => None
@@ -230,12 +247,12 @@ impl RtpServer {
     pub fn get_app_data(&mut self) -> (u64, Vec<u8>) {
         let front = self.queued_streams.front().unwrap();
         self.last_provided_stream = front.queued_packet.0;
-        debug!(
+        /*debug!(
             "Send data on stream {}, offset={}, len={}",
             self.last_provided_stream,
             front.sent,
             front.queued_packet.1.len() - front.sent
-        );
+        );*/
         (
             front.queued_packet.0,
             front.queued_packet.1[front.sent..].to_vec(),
@@ -318,11 +335,16 @@ impl RtpServer {
 
         let rtp = RtpHeader::from_bytes(buf[..12].try_into().unwrap());
 
-        if rtp.payload_type == 96 && rtp.marker{
-            if let Some(logger) = &mut self.logger{
-                logger.write(format!("{},{}\n", rtp.timestamp, self.frame_count).as_bytes()).expect("Failed to write to logger");
+        if rtp.payload_type == 96{
+            let count = self.timestamp_count.entry(rtp.timestamp).or_insert(0);
+            *count += 1;
+            if rtp.marker{
+                if let Some(logger) = &mut self.logger{
+                    logger.write(format!("{},{},{}\n", rtp.timestamp, self.frame_count, *count).as_bytes()).expect("Failed to write to logger");
+                }
+                self.frame_count += 1;
+                self.timestamp_count.remove(&rtp.timestamp);
             }
-            self.frame_count += 1;
         }
 
         trace!(
@@ -358,11 +380,11 @@ impl RtpServer {
     pub fn stream_written(&mut self, v: usize) {
         let udp_packet_buf = self.queued_streams.front_mut().unwrap();
         udp_packet_buf.sent += v;
-        trace!(
+        /*trace!(
             "written {} bytes, {} bytes remaining",
             v,
             udp_packet_buf.queued_packet.1.len() - udp_packet_buf.sent
-        );
+        );*/
         if udp_packet_buf.sent == udp_packet_buf.queued_packet.1.len() {
             self.queued_streams.pop_front();
         }
@@ -444,7 +466,8 @@ impl RtpHeader{
 pub struct RtpLossTracker{
     recv: u64,
     lost: u64,
-    highest: u16
+    highest: u16,
+    smoothed_loss_rate: f64
 }
 
 impl RtpLossTracker{
@@ -452,7 +475,8 @@ impl RtpLossTracker{
         RtpLossTracker{
             recv: 0,
             lost: 0,
-            highest: 0
+            highest: 0,
+            smoothed_loss_rate: 0.0
         }
     }
 
@@ -467,9 +491,13 @@ impl RtpLossTracker{
             return;
         }
         self.recv += 1;
+        self.smoothed_loss_rate = 0.85 * self.smoothed_loss_rate;               // (1-alpha) * PrevLossRate + alpha * 0
         if missing != 0{
             // we lost some seq # and those are after self.highest
             self.lost += missing as u64;
+            for _ in 0..missing{
+                self.smoothed_loss_rate = 0.85 * self.smoothed_loss_rate + 0.15; // (1-alpha) * PrevLossRate + alpha * 1
+            }
         }
         let next = header.seq.wrapping_add(1);
         if self.highest > u16::MAX / 4 * 3 && header.seq < u16::MAX / 4{
@@ -489,6 +517,10 @@ impl RtpLossTracker{
 
     pub fn loss_rate(&self) -> f64{
         self.lost as f64 / ((self.lost + self.recv) as f64)
+    }
+
+    pub fn smoothed_loss_rate(&self) -> f64{
+        self.smoothed_loss_rate
     }
 }
 

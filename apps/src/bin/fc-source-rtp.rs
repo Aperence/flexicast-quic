@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::path::Path;
 use std::time::Duration;
+use std::usize;
 
 use clap::Parser;
 use quiche::flexicast;
@@ -783,7 +784,8 @@ fn main() {
         clients_ids.retain(|_, id| clients.contains_key(id));
 
         // Set the congestion window for each flexicast channel.
-        for (i, fc_chan) in fc_channels.iter_mut().enumerate() {
+        for (_, fc_chan) in fc_channels.iter_mut().enumerate() {
+            /*
             if let Some(ref bitrates) = args.bitrates {
                 // Set the bitrate of each channel accordingly.
                 fc_chan.fc_chan.channel.fc_set_flow_cwnd(
@@ -791,9 +793,10 @@ fn main() {
                         (8 * fc_chan.mc_announce_data.expiration_timer))
                         as usize,
                 );
+
+
             } else {
                 // Rely on the congestion control.
-                /*
                 let clients_conn = clients.iter_mut().map(|c| &mut c.1.conn);
                 ucs_to_mc_cwnd!(
                     &mut fc_chan.fc_chan.channel,
@@ -801,8 +804,12 @@ fn main() {
                     now,
                     None
                 );
-                */
+
             }
+            */
+            // don't use a congestion window, application is paced
+            // by RTP sources
+            fc_chan.fc_chan.channel.fc_set_flow_cwnd(usize::MAX);
         }
 
         debug!("Number of receivers:");
@@ -1185,19 +1192,20 @@ fn send_rtp_data_datagram(rtp_server: &mut RtpServer, fc_chan: &mut FcChannelInf
     // if at least 1 receiver, send datagram, otherwise drop packet
     if fc_chan.number_receivers > 0{
         match fc_chan
-        .fc_chan
-        .channel
-        .dgram_send(&app_data)
+            .fc_chan
+            .channel
+            .dgram_send(&app_data)
         {
             Ok(v) => v,
             Err(quiche::Error::Done) => {
-                debug!("{:?}: Done", rtp_server.socket);
+                debug!("{} couldn't write data", rtp_server.socket);
                 return false;
             },
             Err(e) => panic!("Other error: {:?}", e),
         };
-    }
 
+        debug!("Written {} bytes on {}", app_data.len(), rtp_server.socket)
+    }
     rtp_server.stream_written(app_data.len());
     true
 }
@@ -1229,7 +1237,6 @@ fn update_receivers_counts(client: &mut Client, sources: &mut Vec<FcChannelInfo>
             }
         }
     }
-
 
     Some(())
 }
