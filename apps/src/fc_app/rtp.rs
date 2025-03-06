@@ -8,8 +8,10 @@ use std::hash::Hash;
 use std::{io, u32};
 use std::io::Write;
 use std::net::SocketAddr;
-use std::time;
+use std::time::{self, Instant};
 use std::time::SystemTime;
+
+use super::pacer::TokenPacer;
 
 #[derive(Debug)]
 pub enum SockType {
@@ -138,6 +140,7 @@ pub struct RtpServer {
     logger: Option<File>,
     timestamp_count: HashMap<u32, usize>,
     frame_count: u64,
+    pacer: Option<TokenPacer>
 }
 
 impl RtpServer {
@@ -167,6 +170,7 @@ impl RtpServer {
             logger: Self::get_logger(logger_path),
             timestamp_count: HashMap::new(),
             frame_count: 0,
+            pacer: None
         })
     }
 
@@ -197,6 +201,7 @@ impl RtpServer {
             logger: Self::get_logger(logger_path),
             timestamp_count: HashMap::new(),
             frame_count: 0,
+            pacer: None
         })
     }
 
@@ -220,6 +225,7 @@ impl RtpServer {
             logger: Self::get_logger(logger_path),
             timestamp_count: HashMap::new(),
             frame_count: 0,
+            pacer: None
         }
     }
 
@@ -244,7 +250,7 @@ impl RtpServer {
         self.socket.tokio()
     }
 
-    pub fn get_app_data(&mut self) -> (u64, Vec<u8>) {
+    pub fn get_app_data(&mut self) -> Option<(u64, Vec<u8>)> {
         let front = self.queued_streams.front().unwrap();
         self.last_provided_stream = front.queued_packet.0;
         /*debug!(
@@ -253,10 +259,16 @@ impl RtpServer {
             front.sent,
             front.queued_packet.1.len() - front.sent
         );*/
-        (
+        if let Some(pacer) = &mut self.pacer{
+            if !pacer.send(front.queued_packet.0 as usize, Instant::now()){
+                return None;
+            }
+        }
+
+        Some((
             front.queued_packet.0,
             front.queued_packet.1[front.sent..].to_vec(),
-        )
+        ))
     }
 
     pub fn on_sent_to_quic(&mut self) {

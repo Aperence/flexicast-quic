@@ -152,7 +152,7 @@ impl Client {
             // Sends to QUIC RTP frames that must be sent through unicast.
             'rtp: loop {
                 if self.rtp_source.should_send_app_data() {
-                    let (stream_id, app_data) = self.rtp_source.get_app_data();
+                    let (stream_id, app_data) = self.rtp_source.get_app_data().unwrap();
 
                     match self.conn.stream_priority(stream_id, 0, false) {
                         Ok(()) => (),

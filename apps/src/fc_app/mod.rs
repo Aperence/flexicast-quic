@@ -4,3 +4,4 @@ pub mod http3;
 pub mod file_transfer;
 pub mod msg_socket;
 pub mod recv_statistics;
+pub mod pacer;

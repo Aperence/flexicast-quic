@@ -616,7 +616,7 @@ fn main() {
                 if rtp_server.should_send_app_data() {
                     if let Some(fc_chan) = fc_channels.get_mut(i) {
                         //send_at_least_once |= send_rtp_data_stream(rtp_server, fc_chan)
-                        send_at_least_once |= send_rtp_data_datagram(rtp_server, fc_chan)
+                        send_at_least_once |= send_rtp_data_datagram(rtp_server, fc_chan).is_some()
                     }
                 }
             }
@@ -1149,13 +1149,14 @@ fn handle_path_events(client: &mut Client) {
     }
 }
 
-// returns true if at least one packet has been sent
-fn send_rtp_data_stream(rtp_server: &mut RtpServer, fc_chan: &mut FcChannelInfo) -> bool{
-    let (stream_id, app_data) = rtp_server.get_app_data();
+// returns the number of bytes sent
+fn send_rtp_data_stream(rtp_server: &mut RtpServer, fc_chan: &mut FcChannelInfo) -> Option<usize>{
+    let (stream_id, app_data) = rtp_server.get_app_data()?;
+
     if fc_chan.number_receivers == 0{
         // drop packet
         rtp_server.stream_written(app_data.len());
-        return true;
+        return Some(app_data.len());
     }
 
     match fc_chan
@@ -1178,16 +1179,16 @@ fn send_rtp_data_stream(rtp_server: &mut RtpServer, fc_chan: &mut FcChannelInfo)
         .stream_send(stream_id, &app_data, true)
     {
         Ok(v) => v,
-        Err(quiche::Error::Done) => { return false; },
+        Err(quiche::Error::Done) => { return None; },
         Err(e) => panic!("Other error: {:?}", e),
     };
 
     rtp_server.stream_written(written);
-    true
+    Some(written)
 }
 
-fn send_rtp_data_datagram(rtp_server: &mut RtpServer, fc_chan: &mut FcChannelInfo) -> bool{
-    let (_, app_data) = rtp_server.get_app_data();
+fn send_rtp_data_datagram(rtp_server: &mut RtpServer, fc_chan: &mut FcChannelInfo) -> Option<usize>{
+    let (_, app_data) = rtp_server.get_app_data()?;
 
     // if at least 1 receiver, send datagram, otherwise drop packet
     if fc_chan.number_receivers > 0{
@@ -1199,7 +1200,7 @@ fn send_rtp_data_datagram(rtp_server: &mut RtpServer, fc_chan: &mut FcChannelInf
             Ok(v) => v,
             Err(quiche::Error::Done) => {
                 debug!("{} couldn't write data", rtp_server.socket);
-                return false;
+                return None;
             },
             Err(e) => panic!("Other error: {:?}", e),
         };
@@ -1207,7 +1208,7 @@ fn send_rtp_data_datagram(rtp_server: &mut RtpServer, fc_chan: &mut FcChannelInf
         debug!("Written {} bytes on {}", app_data.len(), rtp_server.socket)
     }
     rtp_server.stream_written(app_data.len());
-    true
+    Some(app_data.len())
 }
 
 fn update_receivers_counts(client: &mut Client, sources: &mut Vec<FcChannelInfo>) -> Option<()>{
