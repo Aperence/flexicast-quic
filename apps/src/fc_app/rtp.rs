@@ -4,7 +4,6 @@ use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
 use std::fmt::Display;
 use std::fs::File;
-use std::hash::Hash;
 use std::{io, u32};
 use std::io::Write;
 use std::net::SocketAddr;
@@ -146,7 +145,8 @@ pub struct RtpServer {
 impl RtpServer {
     pub fn new(
         bind_addr: std::net::SocketAddr, to_quic_filename: &str,
-        to_wire_filename: &str, stop_msg: &str, logger_path: Option<String>
+        to_wire_filename: &str, stop_msg: &str, logger_path: Option<String>,
+        pacer: Option<TokenPacer>
     ) -> io::Result<Self> {
         info!("new RTP server listening for RTP in {}", bind_addr);
         info!("Stop msg in bytes: {:?}", stop_msg.as_bytes());
@@ -170,13 +170,14 @@ impl RtpServer {
             logger: Self::get_logger(logger_path),
             timestamp_count: HashMap::new(),
             frame_count: 0,
-            pacer: None
+            pacer
         })
     }
 
     pub async fn new_with_tokio(
         bind_addr: std::net::SocketAddr, to_quic_filename: &str,
-        to_wire_filename: &str, stop_msg: &str, logger_path: Option<String>
+        to_wire_filename: &str, stop_msg: &str, logger_path: Option<String>,
+        pacer: Option<TokenPacer>
     ) -> io::Result<Self> {
         info!("new RTP server listening for RTP in {}", bind_addr);
         info!("Stop msg in bytes: {:?}", stop_msg.as_bytes());
@@ -201,11 +202,12 @@ impl RtpServer {
             logger: Self::get_logger(logger_path),
             timestamp_count: HashMap::new(),
             frame_count: 0,
-            pacer: None
+            pacer
         })
     }
 
-    pub fn new_without_socket(stop_msg: &str, logger_path: Option<String>) -> Self {
+    pub fn new_without_socket(stop_msg: &str, logger_path: Option<String>,
+        pacer: Option<TokenPacer>) -> Self {
         Self {
             socket: SockType::None,
             queued_streams: VecDeque::new(),
@@ -225,7 +227,7 @@ impl RtpServer {
             logger: Self::get_logger(logger_path),
             timestamp_count: HashMap::new(),
             frame_count: 0,
-            pacer: None
+            pacer
         }
     }
 

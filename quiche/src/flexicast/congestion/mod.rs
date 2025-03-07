@@ -59,8 +59,8 @@ impl FcCongestionState{
             received_congestion_info: None,
             mc_congestion_scheduler: config.cc_heuristic,
             last_migration: Instant::now(),
-            exp3_state: EXP3State::new(config),
-            statistics: CongestionStats::default(),
+            exp3_state: EXP3State::new(&config.exp3_conf),
+            statistics: CongestionStats::new(config.throughput_window),
         }
     }
 

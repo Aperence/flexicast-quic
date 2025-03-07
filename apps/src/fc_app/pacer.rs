@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{str::FromStr, time::Instant};
 
 pub struct TokenPacer{
     tokens: usize,
@@ -9,18 +9,14 @@ pub struct TokenPacer{
 
 impl TokenPacer{
     pub fn new(rate: usize, buffer: usize, now: Instant) -> Self{
+        let rate = rate / 8; // convert to byterate
+        println!("Creating pacer with params rate={} buffer={}", rate, buffer);
         Self {  
             tokens: 0,
             rate,
             buffer,
             last_action_instant: now
         }
-    }
-
-    pub fn new_rtp(bitrate: usize, I_ratio: f64, I_size_ration: f64, buffer: usize, now: Instant) -> Self{
-        let bitrate = bitrate as f64;
-        let rate = bitrate + bitrate * I_ratio * (I_size_ration - 1.0);
-        Self::new(rate as usize, buffer, now)
     }
 
     fn update_tokens(&mut self, now: Instant){
@@ -41,3 +37,41 @@ impl TokenPacer{
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum PacerType {
+    // Use 1.5x the rate for RTP
+    Higher,
+    // Use the minimal rate needed for the RTP flow
+    Optimal 
+}
+
+impl PacerType{
+    pub fn get_pacer(&self, rate: usize, buffer: usize, now: Instant) -> TokenPacer{
+        match self{
+            PacerType::Higher => {
+                let mut new_rate = rate as f64;
+                new_rate *= 1.5;
+                TokenPacer::new(new_rate as usize, buffer, now)
+            },
+            PacerType::Optimal => {
+                let i_ratio = 1.0 / 30.0;
+                let i_size_ratio = 5.0;
+                let mut new_rate = rate as f64;
+                new_rate = new_rate + new_rate * i_ratio * (i_size_ratio - 1.0);
+                TokenPacer::new(new_rate as usize, buffer, now)
+            },
+        }
+    }
+}
+
+impl FromStr for PacerType{
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "optimal" => Ok(PacerType::Optimal),
+            "higher" => Ok(PacerType::Higher),
+            _ => Err("Invalid type".to_string())
+        }
+    }
+}

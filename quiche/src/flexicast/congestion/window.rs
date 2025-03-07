@@ -48,7 +48,7 @@ where
         self.values.last_key_value().map(|(val, _)| val)
     }
 
-    pub fn iter<'a>(&'a self) -> impl Iterator<Item = &T> + 'a{
+    pub fn _iter<'a>(&'a self) -> impl Iterator<Item = &'a T>{
         self.window.values()
     }
 }
@@ -70,7 +70,7 @@ mod tests {
                 Action::Insert(delay, value) => window.add_data(start + Duration::from_millis(delay), value),
                 Action::TimePass(delay) => window.time_elapsed(start + Duration::from_millis(delay)),
             }
-            assert!(window.iter().eq(expected.iter()))
+            assert!(window._iter().eq(expected.iter()))
         }
     }
 

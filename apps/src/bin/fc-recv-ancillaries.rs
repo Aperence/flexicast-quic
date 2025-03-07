@@ -5,8 +5,7 @@ use clap::Parser;
 use polling::Event;
 use polling::Events;
 use polling::Poller;
-use quiche::flexicast;
-use quiche::flexicast::congestion::FlexicastCongestion;
+use quiche::flexicast::congestion::config::FcCongestionConfig;
 use quiche::flexicast::congestion::FlexicastCongestionConnection;
 use quiche::flexicast::FcError;
 use quiche::flexicast::FlexicastConnection;
@@ -27,15 +26,12 @@ use quiche_apps::fc_app::rtp::RtpLossTracker;
 use ring::rand::SecureRandom;
 use ring::rand::SystemRandom;
 use std::convert::TryInto;
-use std::fs::File;
-use std::io::Write;
 use std::net;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::net::ToSocketAddrs;
-use std::num::ParseIntError;
 use std::process::Command;
 use std::time;
 use std::time::Duration;
@@ -116,6 +112,26 @@ struct Args {
     /// Duration of data reception
     #[clap(long, value_parser = humantime::parse_duration, default_value = "5s")]
     listen_duration: Duration,
+
+    /// Migration timeout
+    #[clap(long, value_parser = humantime::parse_duration, default_value = "5s")]
+    migration_timeout: Option<Duration>,
+
+    /// Loss threshold used by EXP3
+    #[clap(long)]
+    loss_threshold: Option<f64>,
+
+    /// Throughput time window used by EXP3
+    #[clap(long, value_parser = humantime::parse_duration, default_value = "5s")]
+    throughput_time_window: Option<Duration>,
+
+    /// K parameter used by EXP3
+    #[clap(long)]
+    k: Option<f64>,
+
+    /// Gamma parameter used by EXP3
+    #[clap(long)]
+    gamma: Option<f64>,
 }
 
 fn main() {
@@ -160,7 +176,7 @@ fn main() {
     };
 
     // Create the configuration for the QUIC connection.
-    let mut config = get_config(args.flexicast);
+    let mut config = get_config(&args);
 
     // Generate a random source connection ID for the connection.
     let mut scid = [0; 16];
@@ -487,7 +503,7 @@ fn main() {
 }
 
 fn get_config(
-    flexicast: bool,
+    args: &Args
 ) -> quiche::Config {
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     config.verify_peer(false); // Not prodction-ready.
@@ -496,7 +512,7 @@ fn get_config(
         .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
         .unwrap();
 
-    if !flexicast {
+    if !args.flexicast {
         config.set_max_idle_timeout(100_000);
     }
     config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
@@ -513,9 +529,27 @@ fn get_config(
     config.set_initial_max_path_id(10);
     config.enable_dgram(true, 10000, 10000);
 
-    if flexicast {
+    if args.flexicast {
         config.set_initial_max_path_id(10);
-        config.set_enable_flexicast(flexicast);
+        config.set_enable_flexicast(args.flexicast);
+
+        // configuration of exp3
+        if let Some(gamma) = args.gamma{
+            config.set_fc_exp3_gamma(Some(gamma));
+        }
+        if let Some(k) = args.k{
+            config.set_fc_exp3_k(k);
+        }
+        if let Some(migration_timeout) = args.migration_timeout{
+            config.set_fc_exp3_migration_timeout(migration_timeout);
+        }
+        if let Some(throughput_time_window) = args.throughput_time_window{
+            config.set_fc_throughput_window(throughput_time_window);
+        }
+        if let Some(loss_threshold) = args.loss_threshold{
+            config.set_fc_exp3_loss_threshold(loss_threshold);
+        }
+        
     }
 
     config
@@ -837,7 +871,7 @@ fn rearm_poll(poll: &mut Poller, unicast: &MsgSocket, multicast: &Option<Channel
 }
 
 // Returns true if any data received
-fn process_video_data_stream(conn: &mut Connection, mc_states: &mut Option<Channels>, rtp_client: &mut RtpClient) -> bool{
+fn _process_video_data_stream(conn: &mut Connection, mc_states: &mut Option<Channels>, rtp_client: &mut RtpClient) -> bool{
     let mut buf = [0; 65535];
 
     let mut recv = false;

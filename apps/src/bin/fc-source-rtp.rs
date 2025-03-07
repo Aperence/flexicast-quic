@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::path::Path;
 use std::time::Duration;
+use std::time::Instant;
 use std::usize;
 
 use clap::Parser;
@@ -23,6 +24,7 @@ use quiche::flexicast::FcConfig;
 #[cfg(feature = "qlog")]
 use quiche_apps::common::make_qlog_writer;
 use quiche_apps::common::ClientIdMap;
+use quiche_apps::fc_app::pacer::PacerType;
 use quiche_apps::fc_app::rtp::RtpServer;
 use quiche_apps::sendto::send_to;
 
@@ -137,6 +139,10 @@ struct Args {
     /// Don't use path probing for multicast
     #[clap(long = "no-path-probing")]
     no_path_probing: bool,
+
+    /// Don't use path probing for multicast
+    #[clap(long = "pacer-type")]
+    pacer_type: Option<PacerType>,
 }
 
 fn main() {
@@ -229,6 +235,8 @@ fn main() {
             .unwrap();
     }
 
+    let now = Instant::now();
+
     // Register RTP source handlers.
     let mut rtp_servers = args
         .rtp_src_addr
@@ -236,12 +244,17 @@ fn main() {
         .enumerate()
         .map(|(idx, rtp_addr)| {
             let logger = args.rtp_loggers.as_ref().map(|loggers| loggers[idx].clone());
+            // max burst: 10 RTP packets
+            let buffer = 1100 * 10;
+            let bitrate = args.bitrates.as_ref().unwrap()[idx] as usize;
+            println!("{:?}", args.pacer_type);
             RtpServer::new(
                 *rtp_addr,
                 &args.result_wire_trace,
                 &args.result_wire_trace,
                 &args.rtp_stop,
-                logger
+                logger,
+                args.pacer_type.clone().map(|pacer_type| pacer_type.get_pacer(bitrate, buffer, now))
             )
             .unwrap()
         })
@@ -1150,7 +1163,7 @@ fn handle_path_events(client: &mut Client) {
 }
 
 // returns the number of bytes sent
-fn send_rtp_data_stream(rtp_server: &mut RtpServer, fc_chan: &mut FcChannelInfo) -> Option<usize>{
+fn _send_rtp_data_stream(rtp_server: &mut RtpServer, fc_chan: &mut FcChannelInfo) -> Option<usize>{
     let (stream_id, app_data) = rtp_server.get_app_data()?;
 
     if fc_chan.number_receivers == 0{

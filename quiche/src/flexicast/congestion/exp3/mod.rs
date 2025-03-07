@@ -1,18 +1,14 @@
 //! EXP3 congestion control algorithm
-use std::{collections::HashMap, fmt::Display, time::{Duration, Instant}};
+use std::{collections::HashMap, fmt::Display, time::Instant};
 
-use crate::{flexicast::{self, FlexicastAttributes, McAnnounceData}, Connection};
+use crate::{flexicast::McAnnounceData, Connection};
 
-use super::{stats::CongestionStats, FcCongestionConf, FcCongestionHeuristicOps};
+use super::{config::EXP3Conf, stats::CongestionStats, FcCongestionHeuristicOps};
 use exp3::EXP3;
-use rewarder::{EXP3Rewarder, LOSS_REWARDER, TAU};
-
-static GAMMA: f64 = 0.15;
 
 type CID = Vec<u8>;
 
 /// Join groups depending on an EXP3 heuristic
-/// TODO: elaborate
 pub static EXP3_HEURISTIC: FcCongestionHeuristicOps = FcCongestionHeuristicOps {
     should_change_channel: exp3_should_change_channel
 };
@@ -28,6 +24,8 @@ fn exp3_should_change_channel(conn: &mut Connection) -> Option<Vec<u8>> {
     let congestion_stats = &mut flexicast.congestion_state.statistics;
     congestion_stats.update_window(now, current_channel.bitrate.expect("EXP3 expects a fixed bitrate"));
     let congestion_stats = congestion_stats.clone();
+    let conf = &flexicast.congestion_state.exp3_state.conf.clone();
+    let rewarder = conf.rewarder;
     let exp3_state = &mut flexicast.congestion_state.exp3_state;
 
 
@@ -37,18 +35,10 @@ fn exp3_should_change_channel(conn: &mut Connection) -> Option<Vec<u8>> {
         exp3_state.update_instances(announce_data);
         let current_channel_idx = exp3_state.ordered_channels.iter().position(|c| c == &current_channel.channel_id).unwrap();
 
-        // DUMMY test: remove after
-        if current_channel_idx == 0{
-            return Some(exp3_state.ordered_channels[1].clone());
-        }else{
-            return Some(exp3_state.ordered_channels[0].clone());
-            //return None
-        }
-        /*
-        println!("State:\n{}", exp3_state);
+        debug!("State:\n{}", exp3_state);
 
         if let Some(previous_cid) = &exp3_state.previous_channel{
-            let reward = (exp3_state.rewarder.reward)(&congestion_stats);
+            let reward = (rewarder.reward)(&congestion_stats, conf);
             exp3_state.instances
                 .entry(previous_cid.clone())
                 .and_modify(|e| {
@@ -61,9 +51,9 @@ fn exp3_should_change_channel(conn: &mut Connection) -> Option<Vec<u8>> {
         let exp3_instance = exp3_state.instances.get_mut(&current_channel.channel_id)
             .expect("Should have an instance for the current channel");
 
-        println!("Taking action for channel {}", current_channel_idx);
+        debug!("Taking action for channel {}", current_channel_idx);
         let action: Action = exp3_instance.take_action(banned).expect("Failed to take action").into();
-        println!("Action is: {:?}", action);
+        debug!("Action is: {:?}", action);
 
         exp3_state.previous_channel = Some(current_channel.channel_id);
 
@@ -76,8 +66,8 @@ fn exp3_should_change_channel(conn: &mut Connection) -> Option<Vec<u8>> {
             },
             _ => None,
         };
-        println!("New channel is {:?}", new_channel);
-        return new_channel;*/
+        debug!("New channel is {:?}", new_channel);
+        return new_channel;
     }
     None
 }
@@ -116,20 +106,20 @@ pub struct EXP3State{
     last_taken_action: Instant,
     ordered_channels: Vec<CID>,
     previous_channel: Option<CID>,
-    rewarder: &'static EXP3Rewarder
+    conf: EXP3Conf
 }
 
 impl EXP3State {
-    pub(crate) fn new(config: &FcCongestionConf) -> Self{
+    pub(crate) fn new(config: &EXP3Conf) -> Self{
         let mut state = Self::default();
-        state.rewarder = config.exp3_rewarder;
+        state.conf = config.clone();
         state
     }
 
     fn update_instances(&mut self, announce_data: &Vec<McAnnounceData>){
         for announce in announce_data{
             if !self.instances.contains_key(&announce.channel_id){
-                let instance = EXP3::new(3, Some(GAMMA));
+                let instance = EXP3::new(3, self.conf.gamma);
                 self.instances.insert(announce.channel_id.clone(), instance);
             }
         }
@@ -143,13 +133,13 @@ impl EXP3State {
     }
 
     fn wait_timeout_elapsed(&self, now: Instant) -> bool{
-        now > self.last_taken_action + Duration::from_secs(5)
+        now > self.last_taken_action + self.conf.migration_timeout
     }
 
     fn get_banned(&self, stats: &CongestionStats) -> Vec<usize>{
         let banned = if stats.loss_rate < 0.01{
             vec![Action::Decrease]
-        }else if stats.loss_rate > 2.0 * TAU{
+        }else if stats.loss_rate > self.conf.hard_loss_threshold{
             vec![Action::Stay, Action::Increase]
         }else{
             vec![]
@@ -178,7 +168,7 @@ impl Default for EXP3State{
             last_taken_action: Instant::now(),
             ordered_channels: vec![],
             previous_channel: None,
-            rewarder: &LOSS_REWARDER,
+            conf: EXP3Conf::default()
         }
     }
 }

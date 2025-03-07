@@ -1,12 +1,9 @@
-use crate::flexicast::congestion::stats::CongestionStats;
+use crate::flexicast::congestion::{config::EXP3Conf, stats::CongestionStats};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EXP3Rewarder{
-    pub(crate) reward: fn(&CongestionStats) -> f64
+    pub(crate) reward: fn(&CongestionStats, &EXP3Conf) -> f64
 }
-
-pub static K: f64 = 25.0;
-pub static TAU: f64 = 0.15;
 
 #[inline]
 fn sigmoid(x: f64, k: f64) -> f64{
@@ -15,9 +12,11 @@ fn sigmoid(x: f64, k: f64) -> f64{
 }
 
 pub static LOSS_REWARDER: EXP3Rewarder = EXP3Rewarder{
-    reward: |congestion_stats| {
+    reward: |congestion_stats, conf| {
+        let tau = conf.loss_threshold;
+        let k = conf.k;
         let scaled = congestion_stats.throughput as f64 / congestion_stats.max_throughput() as f64;
-        let regret = (1.0 - sigmoid(congestion_stats.loss_rate - TAU, K)) / sigmoid(TAU, K);
+        let regret = (1.0 - sigmoid(congestion_stats.loss_rate - tau, k)) / sigmoid(tau, k);
         scaled * regret
     }
 };

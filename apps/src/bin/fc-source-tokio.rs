@@ -485,7 +485,7 @@ async fn main() {
                 rx_ctl: rx,
                 tx_tcl: tx_fc_ctl.clone(),
                 tx_main: tx_main.clone(),
-                rtp_source: RtpServer::new_without_socket(&args.rtp_stop, None),
+                rtp_source: RtpServer::new_without_socket(&args.rtp_stop, None, None),
                 uc_sock: socket.clone(),
                 unlimited_cwnd: args.uc_unlimited_cwnd,
                 fcf_scheduler: if args.fall_back_delay.is_some() {
