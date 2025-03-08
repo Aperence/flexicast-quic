@@ -947,7 +947,12 @@ impl Recovery {
                     now,
                 );
 
-                self.bytes_in_flight -= epoch_lost_bytes;
+                if epoch_lost_bytes > self.bytes_in_flight{
+                    debug!("We have an error here captain: {}, {}", self.bytes_in_flight, epoch_lost_bytes);
+                    self.bytes_in_flight = 0;
+                }else{
+                    self.bytes_in_flight -= epoch_lost_bytes;
+                }
             }
         }
 

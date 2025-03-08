@@ -17,6 +17,9 @@ pub static LOSS_REWARDER: EXP3Rewarder = EXP3Rewarder{
         let k = conf.k;
         let scaled = congestion_stats.throughput as f64 / congestion_stats.max_throughput() as f64;
         let regret = (1.0 - sigmoid(congestion_stats.loss_rate - tau, k)) / sigmoid(tau, k);
-        scaled * regret
+        let reward = scaled * regret;
+        // sometimes, due to rounding error we obtain results such as 1.0000000000000002
+        // thus, explicitely bound the result
+        (reward).min(1.0).max(0.0)
     }
 };

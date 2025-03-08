@@ -8,7 +8,8 @@ use super::FcCongestionHeuristicOps;
 /// real rate, thus assuming that we rely on classical congestion control
 /// provided by paths
 pub static KMEANS: FcCongestionHeuristicOps = FcCongestionHeuristicOps {
-    should_change_channel: kmeans_should_change_channel
+    should_change_channel: kmeans_should_change_channel,
+    did_change_channel: |_|{}
 };
 
 fn kmeans_should_change_channel(conn: &mut Connection) -> Option<Vec<u8>> {

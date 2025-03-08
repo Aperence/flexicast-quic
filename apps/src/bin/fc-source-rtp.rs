@@ -247,7 +247,6 @@ fn main() {
             // max burst: 10 RTP packets
             let buffer = 1100 * 10;
             let bitrate = args.bitrates.as_ref().unwrap()[idx] as usize;
-            println!("{:?}", args.pacer_type);
             RtpServer::new(
                 *rtp_addr,
                 &args.result_wire_trace,
@@ -303,10 +302,12 @@ fn main() {
             rtp_stop_timer.saturating_sub(now.duration_since(timer))
         });
 
+        let min_timeout = Some(Duration::from_millis(100));
+
         // The RTP application has no timeout because we get data as soon as it
         // comes on the socket.
         //timeout = [timeout, timeout_fc, timeout_rtp]
-        timeout = [timeout, timeout_rtp]
+        timeout = [timeout, timeout_rtp, min_timeout]
             .iter()
             .flatten()
             .min()

@@ -1,20 +1,24 @@
 use std::{collections::HashMap, error::Error, fmt::Display, fs, io};
 use serde::{Deserialize, Serialize};
 
-type Timestamp = i64;
-type LossStats = HashMap<i64, Vec<f64>>;
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Migration{
     pub new_channel_idx: usize,
     pub new_channel_bitrate: u64,
-    pub last_recv_timestamp: Timestamp
+    pub last_recv_timestamp: i64
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+struct TimestampStats{
+    recv: usize,
+    losses: Vec<f64>,
+    instant_losses: Vec<f64>
 }
 
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MultiChannelRecvStats{
-    stats: Vec<(LossStats, LossStats, Migration)>
+    stats: Vec<(HashMap<i64, TimestampStats>, Migration)>
 }
 
 impl MultiChannelRecvStats{
@@ -26,18 +30,27 @@ impl MultiChannelRecvStats{
 
     pub fn record_loss(&mut self, timestamp: u32, loss_rate: f64){
         let last = self.stats.len()-1;
-        let (losses, _, _) = &mut self.stats[last];
-        losses.entry(timestamp as i64).or_insert(vec![]).push(loss_rate);
+        let (timestamps, _) = &mut self.stats[last];
+        let stats = timestamps.entry(timestamp as i64).or_insert(TimestampStats::default());
+        stats.losses.push(loss_rate);
     }
 
-    pub fn record_smoothed_loss(&mut self, timestamp: u32, smoothed_loss_rate: f64){
+    pub fn record_instant_loss(&mut self, timestamp: u32, smoothed_loss_rate: f64){
         let last = self.stats.len()-1;
-        let (_, smoothed_losses, _) = &mut self.stats[last];
-        smoothed_losses.entry(timestamp as i64).or_insert(vec![]).push(smoothed_loss_rate);
+        let (timestamps, _) = &mut self.stats[last];
+        let stats = timestamps.entry(timestamp as i64).or_insert(TimestampStats::default());
+        stats.instant_losses.push(smoothed_loss_rate);
     }
 
     pub fn migrated(&mut self, migration: Migration){
-        self.stats.push((HashMap::new(), HashMap::new(), migration));
+        self.stats.push((HashMap::new(), migration));
+    }
+
+    pub fn record_recv(&mut self, timestamp: u32){
+        let last = self.stats.len()-1;
+        let (timestamps, _) = &mut self.stats[last];
+        let stats = timestamps.entry(timestamp as i64).or_insert(TimestampStats::default());
+        stats.recv += 1;
     }
 
     pub fn write(self, path: &str) -> Result<(), StatErr>{
