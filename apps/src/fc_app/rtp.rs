@@ -262,7 +262,8 @@ impl RtpServer {
             front.queued_packet.1.len() - front.sent
         );*/
         if let Some(pacer) = &mut self.pacer{
-            if !pacer.send(front.queued_packet.0 as usize, Instant::now()){
+            let size = front.queued_packet.1[front.sent..].len();
+            if !pacer.send(size, Instant::now()){
                 return None;
             }
         }

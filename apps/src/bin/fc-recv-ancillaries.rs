@@ -925,6 +925,7 @@ fn _process_video_data_stream(conn: &mut Connection, mc_states: &mut Option<Chan
 }
 
 fn process_video_data_datagram(conn: &mut Connection, mc_states: &mut Option<Channels>, rtp_client: &mut RtpClient, rtp_debug_sinks: &mut Option<Vec<RtpClient>>) -> bool{
+    let now = SystemTime::now();
     let mut buf = [0; 65535];
 
     let mut recv = false;
@@ -943,7 +944,7 @@ fn process_video_data_datagram(conn: &mut Connection, mc_states: &mut Option<Cha
             channels.max_timestamp = channels.max_timestamp.max(rtp.timestamp);
             channels.stats.record_loss(rtp.timestamp, channels.rtp_loss_tracker.loss_rate());
             channels.stats.record_instant_loss(rtp.timestamp, channels.rtp_loss_tracker.instant_loss_rate());
-            channels.stats.record_recv(rtp.timestamp);
+            channels.stats.record_recv(rtp.timestamp, len, now);
         }
 
         conn.update_app_data_loss(channels.rtp_loss_tracker.loss_rate());

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, error::Error, fmt::Display, fs, io};
+use std::{collections::HashMap, error::Error, fmt::Display, fs, io, time::SystemTime};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -8,9 +8,16 @@ pub struct Migration{
     pub last_recv_timestamp: i64
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Reception{
+    size: usize,
+    time: f64
+}
+
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct TimestampStats{
     recv: usize,
+    recv_times: Vec<Reception>,
     losses: Vec<f64>,
     instant_losses: Vec<f64>
 }
@@ -46,11 +53,15 @@ impl MultiChannelRecvStats{
         self.stats.push((HashMap::new(), migration));
     }
 
-    pub fn record_recv(&mut self, timestamp: u32){
+    pub fn record_recv(&mut self, timestamp: u32, size: usize, now: SystemTime){
         let last = self.stats.len()-1;
         let (timestamps, _) = &mut self.stats[last];
         let stats = timestamps.entry(timestamp as i64).or_insert(TimestampStats::default());
         stats.recv += 1;
+        stats.recv_times.push(Reception{
+            size,
+            time: now.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64()
+        });
     }
 
     pub fn write(self, path: &str) -> Result<(), StatErr>{
