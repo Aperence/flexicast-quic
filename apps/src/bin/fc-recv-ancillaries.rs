@@ -114,7 +114,7 @@ struct Args {
     listen_duration: Duration,
 
     /// Migration timeout
-    #[clap(long, value_parser = humantime::parse_duration, default_value = "5s")]
+    #[clap(long, value_parser = humantime::parse_duration)]
     migration_timeout: Option<Duration>,
 
     /// Loss threshold used by EXP3
@@ -122,7 +122,7 @@ struct Args {
     loss_threshold: Option<f64>,
 
     /// Throughput time window used by EXP3
-    #[clap(long, value_parser = humantime::parse_duration, default_value = "5s")]
+    #[clap(long, value_parser = humantime::parse_duration)]
     throughput_time_window: Option<Duration>,
 
     /// K parameter used by EXP3
@@ -272,6 +272,7 @@ fn main() {
             // conn.rmc_timeout(now), // Reliable FC-QUIC timeout
             // timer_change,          // FC Channel change
             Some(timer_end),
+            Some(Duration::from_millis(100)) // do at least some work every 100ms
         ];
         let timeout = timers.iter().flatten().min().copied();
 
@@ -549,7 +550,6 @@ fn get_config(
         if let Some(loss_threshold) = args.loss_threshold{
             config.set_fc_exp3_loss_threshold(loss_threshold);
         }
-        
     }
 
     config
@@ -625,6 +625,9 @@ impl ChannelState{
             }
         }
         self.lifetime = ChannelLifetime::Joined;
+
+        // Inform flexicast that we effectively changed of channel
+        conn.fc_did_change_channel();
     }
 
     fn get_group_ip(mc_announce_data: &McAnnounceData, local_ip: IpAddr, proxy: bool) -> SocketAddr{
@@ -824,6 +827,13 @@ fn check_migrate(args: &Args, conn: &mut Connection, mc_states: &mut Channels, s
     let channel_id = mc_states.changing_cid.as_ref()?;
     let multicast = conn.get_flexicast_attributes_mut()?;
 
+    if channel_id == &multicast.get_mc_announce_data_active().unwrap().channel_id{
+        // no change, but we must reset the loss stats as this is a new Monitoring Interval
+        mc_states.rtp_loss_tracker.reset();
+        mc_states.changing_cid = None;
+        conn.fc_did_change_channel();
+        return None;
+    }
 
     info!("Should change to channel {:?}", channel_id);
 
@@ -915,6 +925,7 @@ fn _process_video_data_stream(conn: &mut Connection, mc_states: &mut Option<Chan
 }
 
 fn process_video_data_datagram(conn: &mut Connection, mc_states: &mut Option<Channels>, rtp_client: &mut RtpClient, rtp_debug_sinks: &mut Option<Vec<RtpClient>>) -> bool{
+    let now = SystemTime::now();
     let mut buf = [0; 65535];
 
     let mut recv = false;
@@ -931,11 +942,12 @@ fn process_video_data_datagram(conn: &mut Connection, mc_states: &mut Option<Cha
             channels.rtp_loss_tracker.on_header_recv(&rtp);
             // get the RTP header and store the timestamp if at start of stream and higher stream id
             channels.max_timestamp = channels.max_timestamp.max(rtp.timestamp);
+            channels.stats.record_loss(rtp.timestamp, channels.rtp_loss_tracker.loss_rate());
+            channels.stats.record_instant_loss(rtp.timestamp, channels.rtp_loss_tracker.instant_loss_rate());
+            channels.stats.record_recv(rtp.timestamp, len, now);
         }
 
         conn.update_app_data_loss(channels.rtp_loss_tracker.loss_rate());
-        channels.stats.record_loss(rtp.timestamp, channels.rtp_loss_tracker.loss_rate());
-        channels.stats.record_smoothed_loss(rtp.timestamp, channels.rtp_loss_tracker.smoothed_loss_rate());
 
         rtp_client.on_sequential_stream_recv(&buf[..len]);
 

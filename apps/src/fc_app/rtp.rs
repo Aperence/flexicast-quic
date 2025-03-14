@@ -262,7 +262,8 @@ impl RtpServer {
             front.queued_packet.1.len() - front.sent
         );*/
         if let Some(pacer) = &mut self.pacer{
-            if !pacer.send(front.queued_packet.0 as usize, Instant::now()){
+            let size = front.queued_packet.1[front.sent..].len();
+            if !pacer.send(size, Instant::now()){
                 return None;
             }
         }
@@ -481,7 +482,7 @@ pub struct RtpLossTracker{
     recv: u64,
     lost: u64,
     highest: u16,
-    smoothed_loss_rate: f64
+    instant_loss_rate: f64
 }
 
 impl RtpLossTracker{
@@ -490,7 +491,7 @@ impl RtpLossTracker{
             recv: 0,
             lost: 0,
             highest: 0,
-            smoothed_loss_rate: 0.0
+            instant_loss_rate: 0.0
         }
     }
 
@@ -505,12 +506,12 @@ impl RtpLossTracker{
             return;
         }
         self.recv += 1;
-        self.smoothed_loss_rate = 0.85 * self.smoothed_loss_rate;               // (1-alpha) * PrevLossRate + alpha * 0
+        self.instant_loss_rate = 0.85 * self.instant_loss_rate;               // (1-alpha) * PrevLossRate + alpha * 0
         if missing != 0{
             // we lost some seq # and those are after self.highest
             self.lost += missing as u64;
             for _ in 0..missing{
-                self.smoothed_loss_rate = 0.85 * self.smoothed_loss_rate + 0.15; // (1-alpha) * PrevLossRate + alpha * 1
+                self.instant_loss_rate = 0.85 * self.instant_loss_rate + 0.15; // (1-alpha) * PrevLossRate + alpha * 1
             }
         }
         let next = header.seq.wrapping_add(1);
@@ -533,8 +534,8 @@ impl RtpLossTracker{
         self.lost as f64 / ((self.lost + self.recv) as f64)
     }
 
-    pub fn smoothed_loss_rate(&self) -> f64{
-        self.smoothed_loss_rate
+    pub fn instant_loss_rate(&self) -> f64{
+        self.instant_loss_rate
     }
 }
 

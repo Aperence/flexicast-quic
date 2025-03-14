@@ -13,7 +13,8 @@ const MAX_DELAY_MULTIPLIER: u32 = 16;
 /// An heuristic returning whether a multicast client should change
 /// the channel it is listening to, in reaction to congestion.
 pub struct FcCongestionHeuristicOps {
-    should_change_channel: fn(conn: &mut Connection) -> Option<Vec<u8>>
+    should_change_channel: fn(conn: &mut Connection) -> Option<Vec<u8>>,
+    did_change_channel: fn(conn: &mut Connection)
 }
 
 pub(crate) struct FcCongestionState{
@@ -142,6 +143,9 @@ pub trait FlexicastCongestionConnection {
     /// join
     fn fc_should_change_channel(&mut self) -> Option<Vec<u8>>;
 
+    /// Inform the congestion control that a receiver changed of channel
+    fn fc_did_change_channel(&mut self);
+
     /// Updates the flexicast channel loss rate based on loss rate
     /// measured by the application (typically missing sequence numbers
     /// for RTP)
@@ -207,6 +211,12 @@ impl FlexicastCongestionConnection for Connection{
         let fc_path_id = self.flexicast.as_ref()?.get_fc_path_id()? as usize;
         let cwnd = self.paths.get(fc_path_id).ok()?.recovery.cwnd();
         Some(cwnd)
+    }
+
+    fn fc_did_change_channel(&mut self) {
+        let flexicast = self.flexicast.as_ref().unwrap();
+        let scheduler = flexicast.congestion_state.mc_congestion_scheduler;
+        (scheduler.did_change_channel)(self)
     }
 
 }
