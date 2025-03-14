@@ -137,7 +137,7 @@ impl EXP3State {
     }
 
     fn get_banned(&self, stats: &CongestionStats) -> Vec<usize>{
-        let banned = if stats.loss_rate < 0.01{
+        let banned = if stats.loss_rate < 0.005{
             vec![Action::Decrease]
         }else if stats.loss_rate > self.conf.hard_loss_threshold{
             vec![Action::Stay, Action::Increase]
