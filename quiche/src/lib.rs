@@ -4031,8 +4031,9 @@ impl Connection {
                         }
                     },
 
-                    frame::Frame::McState { .. } => {
+                    frame::Frame::McState { action, action_data, .. } => {
                         if let Some(flexicast) = self.flexicast.as_mut() {
+                            debug!("Lost McState {:?}, {:?} and current role is {:?}", flexicast::FcClientAction::try_from(action), action_data, flexicast.get_mc_role());
                             flexicast.set_mc_state_in_flight(false);
                         }
                     },
@@ -4902,6 +4903,9 @@ impl Connection {
 
                         ack_eliciting = true;
                         in_flight = true;
+                        // allowing retransmission if lost, as these frames
+                        // are crucial for congestion control migration
+                        has_data = true;
                     }
                 }
             }

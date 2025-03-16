@@ -271,8 +271,7 @@ fn main() {
             // conn.mc_timeout(now),  // FC-QUIC timeout
             // conn.rmc_timeout(now), // Reliable FC-QUIC timeout
             // timer_change,          // FC Channel change
-            Some(timer_end),
-            Some(Duration::from_millis(100)) // do at least some work every 100ms
+            Some(timer_end)
         ];
         let timeout = timers.iter().flatten().min().copied();
 
@@ -394,6 +393,8 @@ fn main() {
                     mc_states = Some(channels);
                 }
             }
+
+            debug!("Current role: {:?}", flexicast.get_mc_role());
 
             if let Some(mc_states) = &mut mc_states{
                 // update the channel states
@@ -700,6 +701,8 @@ impl ChannelState{
             }
 
             self.mc_socket = Some(mc_socket);
+        }else{
+            error!("Failed to create the second path: {:?}", mc_space_id);
         }
     }
 

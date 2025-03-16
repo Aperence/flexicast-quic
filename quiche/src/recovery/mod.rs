@@ -672,7 +672,7 @@ impl Recovery {
         let unacked_iter = epoch.sent_packets
             .iter_mut()
             // Skip packets that have already been acked or lost, and packets
-            // that don't contain either CRYPTO or STREAM frames.
+            // that don't contain CRYPTO, STREAM or MC_STATE frames.
             .filter(|p| p.has_data && p.time_acked.is_none() && p.time_lost.is_none())
             // Only return as many packets as the number of probe packets that
             // will be sent.

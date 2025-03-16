@@ -528,7 +528,7 @@ impl FlexicastAttributes {
 
         // If the client left the group, it no longer has a space id.
         if new_status == McClientStatus::AwareUnjoined &&
-            matches!(current_status, McClientStatus::Leaving(_))
+            matches!(current_status, McClientStatus::Leaving(_) | McClientStatus::ListenMcPath(_))
         {
             self.fc_path_id = None;
         }

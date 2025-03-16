@@ -279,7 +279,7 @@ fn main() {
     let mut start_rtp_timer: Option<std::time::Instant> = None;
     let mut can_close_conn_after_rtp = false;
 
-    let mut first_receiver_joined = false;
+    let mut no_receiver_timeout = None;
 
     loop {
         // Find the shorter timeout from all the active connections.
@@ -302,12 +302,10 @@ fn main() {
             rtp_stop_timer.saturating_sub(now.duration_since(timer))
         });
 
-        let min_timeout = Some(Duration::from_millis(100));
-
         // The RTP application has no timeout because we get data as soon as it
         // comes on the socket.
         //timeout = [timeout, timeout_fc, timeout_rtp]
-        timeout = [timeout, timeout_rtp, min_timeout]
+        timeout = [timeout, timeout_rtp]
             .iter()
             .flatten()
             .min()
@@ -581,10 +579,6 @@ fn main() {
 
             update_receivers_counts(client, &mut fc_channels);
 
-            if fc_channels.iter().any(|chan| chan.number_receivers != 0){
-                first_receiver_joined = true;
-            }
-
             handle_path_events(client);
 
             // Provides as many CIDs as possible.
@@ -831,9 +825,19 @@ fn main() {
             debug!("{}: {}", Ipv4Addr::from(fc_chan.mc_announce_data.group_ip), fc_chan.number_receivers);
         }
 
-        // Stop sending data if all clients left the communication.
-        if first_receiver_joined && fc_channels.iter().map(|chan| chan.number_receivers).sum::<u64>() == 0 {
-            break;
+        // Stop sending data if all clients left the communication for more than 10s.
+        if fc_channels.iter().map(|chan| chan.number_receivers).sum::<u64>() == 0 {
+            match no_receiver_timeout{
+                Some(timeout) if now.duration_since(timeout) > Duration::from_secs(10) => {
+                    break;
+                },
+                Some(_) => (),
+                None => {
+                    no_receiver_timeout = Some(now)
+                }
+            };
+        } else {
+            no_receiver_timeout = None;
         }
     }
 }
