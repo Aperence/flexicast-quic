@@ -1,5 +1,5 @@
 //! EXP3 congestion control algorithm
-use std::{collections::{HashMap, HashSet}, fmt::Display, time::Instant};
+use std::{collections::{HashMap, HashSet}, fmt::Display, os::linux::raw::stat, time::{Duration, Instant}};
 
 use crate::{flexicast::McAnnounceData, Connection};
 
@@ -31,7 +31,6 @@ fn exp3_should_change_channel(conn: &mut Connection) -> Option<Vec<u8>> {
 
 
     if exp3_state.wait_timeout_elapsed(now){
-        exp3_state.taken_action = true;
 
         exp3_state.update_instances(announce_data);
         let current_channel_idx = exp3_state.ordered_channels.iter().position(|c| c == &current_channel.channel_id).unwrap();
@@ -48,6 +47,7 @@ fn exp3_should_change_channel(conn: &mut Connection) -> Option<Vec<u8>> {
         }
 
         let banned = exp3_state.get_banned(&congestion_stats, current_channel_idx);
+        exp3_state.update_trial_count(&congestion_stats);
 
         let exp3_instance = exp3_state.instances.get_mut(&current_channel.channel_id)
             .expect("Should have an instance for the current channel");
@@ -57,6 +57,8 @@ fn exp3_should_change_channel(conn: &mut Connection) -> Option<Vec<u8>> {
         debug!("Action is: {:?}", action);
 
         exp3_state.previous_channel = Some(current_channel.channel_id.clone());
+        exp3_state.last_taken_action = Some(action);
+        exp3_state.taken_action = true;
 
         let new_channel = match action{
             Action::Increase if current_channel_idx < exp3_state.ordered_channels.len() - 1 => {
@@ -75,11 +77,11 @@ fn exp3_should_change_channel(conn: &mut Connection) -> Option<Vec<u8>> {
 
 fn exp3_did_change_channel(conn: &mut Connection){
     let exp3_state = &mut conn.flexicast.as_mut().unwrap().congestion_state.exp3_state;
-    exp3_state.last_taken_action = Instant::now();
+    exp3_state.last_taken_action_instant = Instant::now();
     exp3_state.taken_action = false;
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
 enum Action {
     Increase = 0,
     Decrease = 1,
@@ -110,10 +112,13 @@ impl From<Action> for usize{
 #[derive(Debug)]
 pub struct EXP3State{
     instances: HashMap<CID, EXP3>,
-    last_taken_action: Instant,
+    taken_action: bool,
+    last_taken_action: Option<Action>,
+    last_taken_action_instant: Instant,
+    failed_increase_count: u32,
+    ban_increase_rounds: u32,
     ordered_channels: Vec<CID>,
     previous_channel: Option<CID>,
-    taken_action: bool,
     conf: EXP3Conf
 }
 
@@ -142,16 +147,23 @@ impl EXP3State {
 
     fn wait_timeout_elapsed(&self, now: Instant) -> bool{
         !self.taken_action &&
-            now > self.last_taken_action + self.conf.migration_timeout
+            now > self.last_taken_action_instant + self.conf.migration_timeout
     }
 
-    fn get_banned(&self, stats: &CongestionStats, current_channel_idx: usize) -> Vec<usize>{
+    fn get_banned(&mut self, stats: &CongestionStats, current_channel_idx: usize) -> Vec<usize>{
         let mut banned = HashSet::new();
         if stats.loss_rate < 0.005{
             banned.extend(vec![Action::Decrease]);
         }else if stats.loss_rate > self.conf.hard_loss_threshold{
             banned.extend(vec![Action::Stay, Action::Increase]);
         }
+
+        // Backoff: ban increase for `ban_increase_rounds` rounds
+        if self.ban_increase_rounds > 0{
+            self.ban_increase_rounds -= 1;
+            banned.insert(Action::Increase);
+        }
+
         if current_channel_idx == 0{
             banned.insert(Action::Decrease); // can't decrease if already at min
         }
@@ -167,6 +179,22 @@ impl EXP3State {
         }
 
         banned.into_iter().map(|action| action.into()).collect()
+    }
+
+
+    fn update_trial_count(&mut self, stats: &CongestionStats){
+        debug!("EXP3: Last taken action: {:?}, loss_rate: {}", self.last_taken_action, stats.loss_rate);
+        if matches!(self.last_taken_action, Some(Action::Increase)){
+            if stats.loss_rate > self.conf.hard_loss_threshold{
+                self.failed_increase_count += 1;
+            } else{
+                self.failed_increase_count = 0;
+            }
+            let max_backoff = 4;
+            self.failed_increase_count = self.failed_increase_count.min(max_backoff);
+            self.ban_increase_rounds = (1 << self.failed_increase_count) - 1;
+        }
+        debug!("EXP3: Number of failed increase: {}", self.failed_increase_count);
     }
 }
 
@@ -187,12 +215,13 @@ impl Default for EXP3State{
     fn default() -> Self {
         Self {
             instances: HashMap::new(),
-            last_taken_action: Instant::now(),
-            // receiver will set this flag to false
-            // when it will join its first channel
             taken_action: true,
+            last_taken_action: None,
+            last_taken_action_instant: Instant::now(),
             ordered_channels: vec![],
             previous_channel: None,
+            ban_increase_rounds: 0,
+            failed_increase_count: 0,
             conf: EXP3Conf::default()
         }
     }

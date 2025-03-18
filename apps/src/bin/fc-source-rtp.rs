@@ -881,7 +881,7 @@ fn get_config(args: &Args) -> quiche::Config {
     config.set_cc_algorithm(quiche::CongestionControlAlgorithm::DISABLED);
     config.enable_pacing(false);
     config.set_enable_flexicast(args.flexicast);
-    config.set_initial_max_path_id(10);
+    config.set_initial_max_path_id(100);
     config.enable_dgram(true, 10000, 10000);
 
     config.set_fc_congestion_info_delay(Duration::from_secs(60 * 60 * 24 * 365)); // don't use congestion info
@@ -1019,7 +1019,7 @@ pub fn get_mc_config(enable_fc: bool, cert_path: &str) -> quiche::Config {
     config.set_initial_max_streams_uni(100_000_000_000);
     config.set_active_connection_id_limit(5);
     config.verify_peer(false);
-    config.set_initial_max_path_id(10);
+    config.set_initial_max_path_id(100);
     config.set_enable_flexicast(enable_fc);
     config.enable_pacing(false);
     config.enable_dgram(true, 10000, 10000);

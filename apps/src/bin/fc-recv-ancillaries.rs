@@ -532,7 +532,7 @@ fn get_config(
     config.enable_dgram(true, 10000, 10000);
 
     if args.flexicast {
-        config.set_initial_max_path_id(10);
+        config.set_initial_max_path_id(100);
         config.set_enable_flexicast(args.flexicast);
 
         // configuration of exp3
