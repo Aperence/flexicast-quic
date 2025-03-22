@@ -6,3 +6,4 @@ pub mod msg_socket;
 pub mod recv_statistics;
 pub mod pacer;
 pub mod ssm;
+pub mod channels;

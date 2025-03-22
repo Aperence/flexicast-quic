@@ -64,7 +64,7 @@ impl MultiChannelRecvStats{
         });
     }
 
-    pub fn write(self, path: &str) -> Result<(), StatErr>{
+    pub fn write(&self, path: &str) -> Result<(), StatErr>{
         let json = serde_json::to_string(&self)?;
         fs::write(path, json)?;
         Ok(())

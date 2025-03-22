@@ -9,29 +9,22 @@ use quiche::flexicast::congestion::config::FcCongestionConfig;
 use quiche::flexicast::congestion::FlexicastCongestionConnection;
 use quiche::flexicast::FcError;
 use quiche::flexicast::FlexicastConnection;
-use quiche::flexicast::McAnnounceData;
 use quiche::flexicast::McClientStatus;
 use quiche::flexicast::McConfig;
 use quiche::flexicast::McRole;
 use quiche::h3::NameValue;
 use quiche::Connection;
-use quiche::ConnectionId;
 use quiche::Error;
 #[cfg(feature = "qlog")]
 use quiche_apps::common::make_qlog_writer;
-use quiche_apps::fc_app::recv_statistics::Migration;
-use quiche_apps::fc_app::recv_statistics::MultiChannelRecvStats;
+use quiche_apps::fc_app::channels::Channels;
 use quiche_apps::fc_app::rtp::RtpHeader;
-use quiche_apps::fc_app::rtp::RtpLossTracker;
-use quiche_apps::fc_app::ssm::SSM;
 use ring::rand::SecureRandom;
 use ring::rand::SystemRandom;
 use std::convert::TryInto;
-use std::net;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
-use std::net::SocketAddrV4;
 use std::net::ToSocketAddrs;
 use std::process::Command;
 use std::time;
@@ -328,7 +321,7 @@ fn main() {
         if let Some(mc_states) = &mut mc_states{
             // Read incomming UDP packets from the multicast sockets and feed them to
             // flexicast quiche.
-            for state in mc_states.channels.iter_mut(){
+            for state in mc_states.channels_mut(){
                 if let Some(mc_socket) = state.mc_socket.as_mut() {
                     'mc_read: loop {
                         let (len, _, ancillaries) = match mc_socket.recv_from(&mut buf) {
@@ -390,7 +383,6 @@ fn main() {
                 if let Some(announce_data) = flexicast.get_mc_announce_data(args.idx_fc_chan){
                     let mut channels = Channels::new();
                     channels.join_channel(args.idx_fc_chan, announce_data);
-                    channels.initial_channel_joined(args.idx_fc_chan, announce_data);
                     mc_states = Some(channels);
                 }
             }
@@ -399,7 +391,7 @@ fn main() {
 
             if let Some(mc_states) = &mut mc_states{
                 // update the channel states
-                for state in mc_states.channels.iter_mut(){
+                for state in mc_states.channels_mut(){
 
                     // Stop the socket if the client left the group and it was
                     // acknowledged.
@@ -501,7 +493,7 @@ fn main() {
     }
 
     if let Some(path) = args.migration_log{
-        mc_states.unwrap().stats.write(&path).unwrap();
+        mc_states.unwrap().get_stats().write(&path).unwrap();
     }
 }
 
@@ -574,253 +566,6 @@ pub fn hdrs_to_strings(hdrs: &[quiche::h3::Header]) -> Vec<(String, String)> {
         .collect()
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum ChannelLifetime{
-    ProvideCid,
-    ProbePath,
-    Bind,
-    Joined,
-    Leaving,
-    Left
-}
-
-#[derive(Debug)]
-struct ChannelState{
-    mc_socket: Option<MsgSocket>,
-    bind_addr: SocketAddr,
-    group_addr: SocketAddr,
-    lifetime: ChannelLifetime,
-    fc_chan_idx: usize,
-    from_fc_change_channel: bool
-}
-
-impl ChannelState{
-    fn should_join_multicast(&self, conn: &Connection) -> bool{
-        let flexicast = conn.get_flexicast_attributes().unwrap();
-
-        self.lifetime == ChannelLifetime::Bind &&
-        flexicast.get_mc_role() == McRole::Client(McClientStatus::ListenMcPath(true))
-    }
-
-    fn join_multicast(&mut self, conn: &mut Connection, proxy: bool, itf: IpAddr, source: IpAddr){
-        let flexicast = conn.get_flexicast_attributes().unwrap();
-        if !proxy {
-            info!("Join MULTICAST on ip {:?}", flexicast
-            .get_mc_announce_data(self.fc_chan_idx)
-            .unwrap()
-            .group_ip
-            .to_owned());
-
-            match (self.group_addr.ip(), itf, source){
-                (IpAddr::V4(ipv4_addr), IpAddr::V4(itf_addr), IpAddr::V4(source))  => {
-                    self.mc_socket
-                    .as_mut()
-                    .unwrap()
-                    .join_ssm_multicast_v4(
-                        &ipv4_addr,
-                        &itf_addr,
-                        &source
-                    )
-                    .unwrap();
-                },
-                (IpAddr::V6(_ipv6_addr), IpAddr::V6(_itf_addr), IpAddr::V4(_source)) => todo!(),
-                _ => error!("Incompatible type of addresses"),
-            }
-        }
-        self.lifetime = ChannelLifetime::Joined;
-
-        // Inform flexicast that we effectively changed of channel
-        conn.fc_did_change_channel();
-    }
-
-    fn get_group_ip(mc_announce_data: &McAnnounceData, local_ip: IpAddr, proxy: bool) -> SocketAddr{
-        if mc_announce_data.probe_path || proxy {
-            net::SocketAddr::new(
-                local_ip,
-                mc_announce_data.udp_port,
-            )
-        } else {
-            SocketAddr::V4(net::SocketAddrV4::new(
-                Ipv4Addr::from(
-                    mc_announce_data.group_ip.to_owned(),
-                ),
-                mc_announce_data.udp_port,
-            ))
-        }
-    }
-
-    fn probe(&mut self, conn: &mut Connection, poll: &mut Poller, local_ip: IpAddr, server_addr: SocketAddr, proxy: bool){
-        if self.lifetime != ChannelLifetime::ProbePath {
-            return;
-        }
-
-        let mc_announce_data = self.get_mc_announce_data(conn);
-
-        debug!("Create the second path. Client addr={:?}. Server addr={:?}", self.bind_addr, server_addr);
-        let mc_space_id = conn.create_mc_path(
-            self.bind_addr,
-            server_addr,
-            mc_announce_data.probe_path,
-        );
-        if let Ok(mc_space_id) = mc_space_id {
-            conn.get_flexicast_attributes_mut().unwrap().set_fc_path_id(mc_space_id);
-
-            // If soft-multicast is used by the source, the client
-            // will receive multicast QUIC
-            // packets with its unicast
-            // address as destination of the IP packet. Bind the
-            // socket to the local address
-            // with the multicast destination
-            // port.
-            let mc_group_sockaddr: net::SocketAddr = Self::get_group_ip(&mc_announce_data, local_ip, proxy);
-
-            if let Some(sock) = self.mc_socket.as_mut() {
-                poll.delete(&sock.socket).unwrap();
-            }
-
-            let mc_socket = MsgSocket::new(mc_group_sockaddr, true);
-            mc_socket.recv_ttl().unwrap();
-            mc_socket.recv_ecn().unwrap();
-
-            unsafe {
-                poll.add(&mc_socket.socket, Event::readable(1)).unwrap()
-            };
-            debug!(
-                "Multicast client binds on address: {:?}",
-                mc_group_sockaddr
-            );
-
-            self.lifetime = ChannelLifetime::Bind;
-
-
-            if !self.from_fc_change_channel{
-                // must still join group
-                conn.mc_join_channel(
-                    false,
-                    Some(&mc_announce_data.channel_id),
-                )
-                .unwrap();
-            }
-
-            self.mc_socket = Some(mc_socket);
-        }else{
-            error!("Failed to create the second path: {:?}", mc_space_id);
-        }
-    }
-
-    fn provide_cid(&mut self, conn: &mut Connection){
-        if self.lifetime != ChannelLifetime::ProvideCid{
-            return;
-        }
-
-        debug!("Add a new connection ID");
-        let mc_announce_data = self.get_mc_announce_data(conn);
-        let scid =
-            ConnectionId::from_ref(&mc_announce_data.channel_id);
-        conn.add_mc_cid(&scid).unwrap();
-        self.lifetime = ChannelLifetime::ProbePath;
-    }
-
-    fn should_leave_multicast(&self) -> bool{
-        self.mc_socket.is_some() && self.lifetime == ChannelLifetime::Leaving
-    }
-
-    fn leave_multicast(&mut self, itf_addr: IpAddr, source: IpAddr, proxy: bool){
-        info!("Leave the multicast socket with ip={}, itf={} !", self.group_addr, itf_addr);
-        if !proxy {
-            match (self.group_addr.ip(), itf_addr, source){
-                (IpAddr::V4(ipv4_addr), IpAddr::V4(itf_addr), IpAddr::V4(source)) => {
-                    self.mc_socket
-                    .as_mut()
-                    .unwrap()
-                    .leave_ssm_multicast_v4(
-                        &ipv4_addr,
-                        &itf_addr,
-                        &source
-                    )
-                    .unwrap();
-                },
-                (IpAddr::V6(_ipv6_addr), IpAddr::V6(_itf_addr), IpAddr::V6(_source)) => todo!(),
-                _ => error!("Inconsistency in ip addresses")
-            }
-        }
-        self.lifetime = ChannelLifetime::Left;
-    }
-
-    fn get_mc_announce_data(&self, conn: &Connection) -> McAnnounceData{
-        conn
-            .get_flexicast_attributes()
-            .unwrap()
-            .get_mc_announce_data(self.fc_chan_idx)
-            .unwrap()
-            .to_owned()
-    }
-}
-
-#[derive(Debug)]
-struct Channels{
-    channels: Vec<ChannelState>,
-    changing_cid: Option<Vec<u8>>,
-    rtp_loss_tracker: RtpLossTracker,
-    max_stream: u64,
-    max_timestamp: u32,
-    stats: MultiChannelRecvStats
-}
-
-impl Channels {
-    fn new() -> Channels{
-        Channels{
-            channels: vec![],
-            changing_cid: None,
-            rtp_loss_tracker: RtpLossTracker::new(),
-            max_stream: 0,
-            max_timestamp: 0,
-            stats: MultiChannelRecvStats::new()
-        }
-    }
-
-    fn initial_channel_joined(&mut self, index: usize, announce_data: &McAnnounceData){
-        self.stats.migrated(Migration{
-            new_channel_idx: index,
-            new_channel_bitrate: announce_data.bitrate.unwrap(),
-            last_recv_timestamp: -1
-        });
-    }
-
-    fn join_channel(&mut self, channel_idx: usize, announce_data: &McAnnounceData){
-        let bind_addr: SocketAddr = format!("0.0.0.0:{}", announce_data.udp_port).parse().unwrap();
-        let group_addr: SocketAddr = SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::from(announce_data.group_ip),
-            announce_data.udp_port
-        ));
-
-        self.channels.push(ChannelState{
-            mc_socket: None,
-            bind_addr,
-            group_addr,
-            lifetime: ChannelLifetime::ProvideCid,
-            fc_chan_idx: channel_idx,
-            from_fc_change_channel: false
-        });
-    }
-
-    fn leave_channel(&mut self, channel_idx: usize){
-        for state in self.channels.iter_mut() {
-            if state.fc_chan_idx == channel_idx && state.lifetime == ChannelLifetime::Joined{
-                state.lifetime = ChannelLifetime::Leaving;
-            }
-        };
-    }
-
-    fn get_socket(&self, port: u16) -> Option<&MsgSocket>{
-        self.channels.iter().find(|state| state.bind_addr.port() == port)?.mc_socket.as_ref()
-    }
-
-    fn clean(&mut self){
-        self.channels.retain(|state| state.lifetime != ChannelLifetime::Left);
-    }
-}
-
 fn check_migrate(args: &Args, conn: &mut Connection, mc_states: &mut Channels, server_addr: SocketAddr) -> Option<()>{
     if !args.auto_migration{
         return None;
@@ -835,7 +580,7 @@ fn check_migrate(args: &Args, conn: &mut Connection, mc_states: &mut Channels, s
 
     if channel_id == &multicast.get_mc_announce_data_active().unwrap().channel_id{
         // no change, but we must reset the loss stats as this is a new Monitoring Interval
-        mc_states.rtp_loss_tracker.reset();
+        mc_states.get_loss_tracker_mut().reset();
         mc_states.changing_cid = None;
         conn.fc_did_change_channel();
         return None;
@@ -846,30 +591,16 @@ fn check_migrate(args: &Args, conn: &mut Connection, mc_states: &mut Channels, s
     let new_idx = multicast.get_mc_announce_data_index(&channel_id).unwrap();
     let announce_data = multicast.get_mc_announce_data(new_idx).unwrap();
 
-    if mc_states.channels.is_empty(){
+    if mc_states.channels().count() == 0{
         info!("Joining new channel");
         // left previous, can finally add the state,
         // rest of pipeline (provide cid, probe path, join group, ...)
         // will be handled in the loop
         mc_states.join_channel(new_idx, announce_data);
-        mc_states.changing_cid = None;
-
-        // log now the migration, as socket is definitively closed
-        let new_bitrate = announce_data.bitrate.unwrap();
-        mc_states.stats.migrated(Migration {
-            new_channel_idx: new_idx,
-            new_channel_bitrate: new_bitrate,
-            last_recv_timestamp: mc_states.max_timestamp as i64
-        });
-
-        // and reset some metadata collected
-        mc_states.max_timestamp = 0;
-        mc_states.max_stream = 0;
-        mc_states.rtp_loss_tracker.reset();
-    }else if !mc_states.channels.is_empty() && mc_states.channels[0].lifetime == ChannelLifetime::Joined{
+    }else if let Some(channel) = mc_states.joined_channel(){
         conn.mc_leave_channel().unwrap();
-        conn.abandon_path(mc_states.channels[0].bind_addr, server_addr, 0).unwrap();
-        mc_states.leave_channel(mc_states.channels[0].fc_chan_idx);
+        conn.abandon_path(channel.bind_addr, server_addr, 0).unwrap();
+        mc_states.leave_channel(channel.fc_chan_idx);
     }
     return None;
 }
@@ -878,56 +609,12 @@ fn rearm_poll(poll: &mut Poller, unicast: &MsgSocket, multicast: &Option<Channel
     poll.modify(&unicast.socket, Event::readable(0)).unwrap();
 
     if let Some(multicast) = multicast{
-        for channel in &multicast.channels{
+        for channel in multicast.channels(){
             if let Some(socket) = &channel.mc_socket{
                 poll.modify(&socket.socket, Event::readable(1)).unwrap();
             }
         }
     }
-}
-
-// Returns true if any data received
-fn _process_video_data_stream(conn: &mut Connection, mc_states: &mut Option<Channels>, rtp_client: &mut RtpClient) -> bool{
-    let mut buf = [0; 65535];
-
-    let mut recv = false;
-    for stream_id in conn.readable() {
-        if !conn.stream_fully_readable(stream_id) {
-            continue;
-        }
-
-        if !conn.stream_readable(stream_id) {
-            continue;
-        }
-
-        // We should be able to read the stream until its end.
-        let mut total = 0;
-        let mut start = true;
-        while let Ok((read, fin)) =
-            conn.stream_recv(stream_id, &mut buf[..])
-        {
-            recv = true;
-
-            total += read;
-
-            let channels = mc_states.as_mut().expect("Should have an mc_state at this point");
-            if start && channels.max_stream < stream_id{
-                // get the RTP header and store the timestamp if at start of stream and higher stream id
-                let rtp = RtpHeader::from_bytes(buf[..12].try_into().unwrap());
-                channels.max_timestamp = rtp.timestamp;
-                channels.max_stream = stream_id;
-            }
-            start = false;
-
-            rtp_client.on_sequential_stream_recv(&buf[..read]);
-
-            if fin {
-                let now_st = SystemTime::now();
-                rtp_client.on_stream_complete(stream_id, now_st, total, None);
-            }
-        }
-    }
-    recv
 }
 
 fn process_video_data_datagram(conn: &mut Connection, mc_states: &mut Option<Channels>, rtp_client: &mut RtpClient, rtp_debug_sinks: &mut Option<Vec<RtpClient>>) -> bool{
@@ -941,24 +628,27 @@ fn process_video_data_datagram(conn: &mut Connection, mc_states: &mut Option<Cha
         let rtp = RtpHeader::from_bytes(buf[..12].try_into().unwrap());
 
         let channels = mc_states.as_mut().expect("Should have an mc_state at this point");
-        debug!("Got {} bytes of DATAGRAM, loss rate {}%", len, (channels.rtp_loss_tracker.loss_rate() * 10000.0).round() / 100.0);
+        debug!("Got {} bytes of DATAGRAM, loss rate {}%", len, (channels.get_loss_tracker().loss_rate() * 10000.0).round() / 100.0);
 
         if rtp.payload_type == 96{
             // not rtcp
-            channels.rtp_loss_tracker.on_header_recv(&rtp);
+            channels.get_loss_tracker_mut().on_header_recv(&rtp);
             // get the RTP header and store the timestamp if at start of stream and higher stream id
-            channels.max_timestamp = channels.max_timestamp.max(rtp.timestamp);
-            channels.stats.record_loss(rtp.timestamp, channels.rtp_loss_tracker.loss_rate());
-            channels.stats.record_instant_loss(rtp.timestamp, channels.rtp_loss_tracker.instant_loss_rate());
-            channels.stats.record_recv(rtp.timestamp, len, now);
+            channels.received_timestamp(rtp.timestamp);
+
+            let loss_rate = channels.get_loss_tracker().loss_rate();
+            let instant_loss_rate = channels.get_loss_tracker().instant_loss_rate();
+            channels.get_stats().record_loss(rtp.timestamp, loss_rate);
+            channels.get_stats().record_instant_loss(rtp.timestamp, instant_loss_rate);
+            channels.get_stats().record_recv(rtp.timestamp, len, now);
         }
 
-        conn.update_app_data_loss(channels.rtp_loss_tracker.loss_rate());
+        conn.update_app_data_loss(channels.get_loss_tracker().loss_rate());
 
         rtp_client.on_sequential_stream_recv(&buf[..len]);
 
         if let Some(rtp_debug_sinks) = rtp_debug_sinks{
-            let idx = mc_states.as_ref().unwrap().channels.get(0).map(|c| c.fc_chan_idx);
+            let idx = mc_states.as_ref().unwrap().joined_channel().map(|c| c.fc_chan_idx);
             if let Some(idx) = idx{
                 rtp_debug_sinks[idx].on_sequential_stream_recv(&buf[..len]);
             }
