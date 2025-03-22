@@ -23,6 +23,7 @@ use quiche_apps::fc_app::recv_statistics::Migration;
 use quiche_apps::fc_app::recv_statistics::MultiChannelRecvStats;
 use quiche_apps::fc_app::rtp::RtpHeader;
 use quiche_apps::fc_app::rtp::RtpLossTracker;
+use quiche_apps::fc_app::ssm::SSM;
 use ring::rand::SecureRandom;
 use ring::rand::SystemRandom;
 use std::convert::TryInto;
@@ -403,7 +404,7 @@ fn main() {
                     // Stop the socket if the client left the group and it was
                     // acknowledged.
                     if state.should_leave_multicast(){
-                        state.leave_multicast(std::net::IpAddr::V4(args.local_ip), args.proxy_uc);
+                        state.leave_multicast(std::net::IpAddr::V4(args.local_ip), peer_addr.ip(), args.proxy_uc);
                     }
 
                     // Join the flexicast channel and creates the listening socket if not
@@ -424,7 +425,7 @@ fn main() {
 
                     // Join the multicast socket.
                     if state.should_join_multicast(&conn){
-                        state.join_multicast(&mut conn, args.proxy_uc, IpAddr::V4(args.local_ip));
+                        state.join_multicast(&mut conn, args.proxy_uc, IpAddr::V4(args.local_ip), peer_addr.ip());
                     }
                 }
             }
@@ -601,7 +602,7 @@ impl ChannelState{
         flexicast.get_mc_role() == McRole::Client(McClientStatus::ListenMcPath(true))
     }
 
-    fn join_multicast(&mut self, conn: &mut Connection, proxy: bool, itf: IpAddr){
+    fn join_multicast(&mut self, conn: &mut Connection, proxy: bool, itf: IpAddr, source: IpAddr){
         let flexicast = conn.get_flexicast_attributes().unwrap();
         if !proxy {
             info!("Join MULTICAST on ip {:?}", flexicast
@@ -610,18 +611,19 @@ impl ChannelState{
             .group_ip
             .to_owned());
 
-            match (self.group_addr.ip(), itf){
-                (IpAddr::V4(ipv4_addr), IpAddr::V4(itf_addr))  => {
+            match (self.group_addr.ip(), itf, source){
+                (IpAddr::V4(ipv4_addr), IpAddr::V4(itf_addr), IpAddr::V4(source))  => {
                     self.mc_socket
                     .as_mut()
                     .unwrap()
-                    .join_multicast_v4(
+                    .join_ssm_multicast_v4(
                         &ipv4_addr,
-                        &itf_addr
+                        &itf_addr,
+                        &source
                     )
                     .unwrap();
                 },
-                (IpAddr::V6(_ipv6_addr), IpAddr::V6(_itf_addr)) => todo!(),
+                (IpAddr::V6(_ipv6_addr), IpAddr::V6(_itf_addr), IpAddr::V4(_source)) => todo!(),
                 _ => error!("Incompatible type of addresses"),
             }
         }
@@ -723,21 +725,22 @@ impl ChannelState{
         self.mc_socket.is_some() && self.lifetime == ChannelLifetime::Leaving
     }
 
-    fn leave_multicast(&mut self, itf_addr: IpAddr, proxy: bool){
+    fn leave_multicast(&mut self, itf_addr: IpAddr, source: IpAddr, proxy: bool){
         info!("Leave the multicast socket with ip={}, itf={} !", self.group_addr, itf_addr);
         if !proxy {
-            match (self.group_addr.ip(), itf_addr){
-                (IpAddr::V4(ipv4_addr), IpAddr::V4(itf_addr)) => {
+            match (self.group_addr.ip(), itf_addr, source){
+                (IpAddr::V4(ipv4_addr), IpAddr::V4(itf_addr), IpAddr::V4(source)) => {
                     self.mc_socket
                     .as_mut()
                     .unwrap()
-                    .leave_multicast_v4(
+                    .leave_ssm_multicast_v4(
                         &ipv4_addr,
                         &itf_addr,
+                        &source
                     )
                     .unwrap();
                 },
-                (IpAddr::V6(_ipv6_addr), IpAddr::V6(_itf_addr)) => todo!(),
+                (IpAddr::V6(_ipv6_addr), IpAddr::V6(_itf_addr), IpAddr::V6(_source)) => todo!(),
                 _ => error!("Inconsistency in ip addresses")
             }
         }

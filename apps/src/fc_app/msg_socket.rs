@@ -135,3 +135,9 @@ impl MsgSocket{
         }
     }
 }
+
+impl AsRawFd for MsgSocket{
+    fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
+        self.socket.as_raw_fd()
+    }
+}
