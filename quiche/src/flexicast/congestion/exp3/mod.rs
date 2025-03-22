@@ -1,5 +1,5 @@
 //! EXP3 congestion control algorithm
-use std::{collections::{HashMap, HashSet}, fmt::Display, os::linux::raw::stat, time::{Duration, Instant}};
+use std::{collections::{HashMap, HashSet}, fmt::Display, time::Instant};
 
 use crate::{flexicast::McAnnounceData, Connection};
 
