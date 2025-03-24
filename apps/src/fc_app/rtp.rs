@@ -130,7 +130,7 @@ pub struct RtpServer {
     to_wire_filename: String,
 
     last_provided_stream: u64,
-    next_stream_id: u64,
+    pub next_stream_id: u64,
     buf: [u8; 2000],
 
     stop_msg: Vec<u8>,

@@ -1,5 +1,6 @@
 pub mod asynchronous;
 pub mod rtp;
+pub mod rtp_async;
 pub mod http3;
 pub mod file_transfer;
 pub mod msg_socket;
