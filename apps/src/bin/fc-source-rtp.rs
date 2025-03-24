@@ -25,14 +25,14 @@ use quiche::flexicast::FcConfig;
 use quiche_apps::common::make_qlog_writer;
 use quiche_apps::common::ClientIdMap;
 use quiche_apps::fc_app::pacer::PacerType;
-use quiche_apps::fc_app::rtp::RtpServer;
+use quiche_apps::fc_app::rtp_async::RtpAsync;
+use quiche_apps::fc_app::rtp_async::RtpAsyncHandler;
 use quiche_apps::sendto::send_to;
 
 use ring::rand::SecureRandom;
 use ring::rand::SystemRandom;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
-const RTP_SOCKET_TOKEN_START: usize = 1;
 
 struct Client {
     conn: quiche::Connection,
@@ -145,7 +145,14 @@ struct Args {
     pacer_type: Option<PacerType>,
 }
 
-fn main() {
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+async fn main() {
+    tokio::task::spawn_blocking(move ||{
+        main_server();
+    });
+}
+
+fn main_server() {
     env_logger::builder()
         .format_timestamp_nanos()
         .init();
@@ -238,38 +245,15 @@ fn main() {
 
     let now = Instant::now();
 
-    // Register RTP source handlers.
-    let mut rtp_servers = args
-        .rtp_src_addr
-        .iter()
-        .enumerate()
-        .map(|(idx, rtp_addr)| {
-            let logger = args.rtp_loggers.as_ref().map(|loggers| loggers[idx].clone());
-            // max burst: 10 RTP packets
-            let buffer = 1100 * 10;
-            let bitrate = args.bitrates.as_ref().unwrap()[idx] as usize;
-            RtpServer::new(
-                *rtp_addr,
-                &args.result_wire_trace,
-                &args.result_wire_trace,
-                &args.rtp_stop,
-                logger,
-                args.pacer_type.clone().map(|pacer_type| pacer_type.get_pacer(bitrate, buffer, now))
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>();
+    let mut rtp_servers = vec![];
 
-    // Register the RTP source socket.
-    let mut rtp_tokens = HashMap::with_capacity(rtp_servers.len());
-    for (i, rtp_server) in rtp_servers.iter_mut().enumerate() {
-        if let Some(add_socket) = rtp_server.additional_udp_socket() {
-            let token = mio::Token(RTP_SOCKET_TOKEN_START + i);
-            poll.registry()
-                .register(add_socket, token, mio::Interest::READABLE)
-                .unwrap();
-            rtp_tokens.insert(token, i);
-        }
+    for (idx, rtp_addr) in args.rtp_src_addr.iter().enumerate(){
+        let logger = args.rtp_loggers.as_ref().map(|loggers| loggers[idx].clone());
+        // max burst: 10 RTP packets
+        let buffer = 1100 * 10;
+        let bitrate = args.bitrates.as_ref().unwrap()[idx] as usize;
+        let pacer = args.pacer_type.clone().map(|pacer_type| pacer_type.get_pacer(bitrate, buffer, now));
+        rtp_servers.push(RtpAsync::run(*rtp_addr, pacer, logger).await);
     }
 
     // Stop RTP timer.
@@ -303,10 +287,12 @@ fn main() {
             rtp_stop_timer.saturating_sub(now.duration_since(timer))
         });
 
+        let rtp_read_timeout = Some(Duration::from_millis(300));
+
         // The RTP application has no timeout because we get data as soon as it
         // comes on the socket.
         //timeout = [timeout, timeout_fc, timeout_rtp]
-        timeout = [timeout, timeout_rtp]
+        timeout = [timeout, timeout_rtp, rtp_read_timeout]
             .iter()
             .flatten()
             .min()
@@ -322,22 +308,10 @@ fn main() {
         // until there are no more packets to read.
         'uc_read: loop {
             // Received content on the RTP source socket.
-            let mut contains_quic_socket_event = false;
-            for event in events.iter() {
-                if let Some(i) = rtp_tokens.get(&event.token()) {
-                    let rtp_server = rtp_servers.get_mut(*i).unwrap();
-                    rtp_server.on_additional_udp_socket_readable();
-
-                    if rtp_server.is_source_rtp_stopped() &&
-                        start_rtp_timer.is_none()
-                    {
-                        debug!("Start RTP end timer");
-                        start_rtp_timer = Some(std::time::Instant::now());
-                    }
-                } else {
-                    contains_quic_socket_event = true;
-                }
-            }
+            let contains_quic_socket_event = !events.is_empty();
+            /* for event in events.iter() {
+                contains_quic_socket_event = true;
+            }*/
 
             // We can close the connection now.
             if let Some(timer) = start_rtp_timer {
@@ -578,7 +552,7 @@ fn main() {
                 },
             };
 
-            update_receivers_counts(client, &mut fc_channels);
+            update_receivers_counts(client, &mut fc_channels, &mut rtp_servers).await;
 
             handle_path_events(client);
 
@@ -622,11 +596,8 @@ fn main() {
         'app_data: loop {
             let mut send_at_least_once = false;
             for (i, rtp_server) in rtp_servers.iter_mut().enumerate() {
-                if rtp_server.should_send_app_data() {
-                    if let Some(fc_chan) = fc_channels.get_mut(i) {
-                        //send_at_least_once |= send_rtp_data_stream(rtp_server, fc_chan)
-                        send_at_least_once |= send_rtp_data_datagram(rtp_server, fc_chan).is_some()
-                    }
+                if let Some(fc_chan) = fc_channels.get_mut(i) {
+                    send_at_least_once |= send_rtp_data_datagram(rtp_server, fc_chan).await.is_some()
                 }
             }
             if !send_at_least_once {
@@ -671,9 +642,11 @@ fn main() {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("mc_send() would block");
                             break 'flexicast;
+                        }else{
+                            debug!("mc_send() to {} failed: {:?}", send_info.to, e);
                         }
 
-                        panic!("mc_send() failed: {:?}", e);
+                        //panic!("mc_send() failed: {:?}", e);
                     }
                     debug!(
                         "Flexicast written {} bytes to {:?}",
@@ -1168,69 +1141,30 @@ fn handle_path_events(client: &mut Client) {
     }
 }
 
-// returns the number of bytes sent
-fn _send_rtp_data_stream(rtp_server: &mut RtpServer, fc_chan: &mut FcChannelInfo) -> Option<usize>{
-    let (stream_id, app_data) = rtp_server.get_app_data()?;
-
-    if fc_chan.number_receivers == 0{
-        // drop packet
-        rtp_server.stream_written(app_data.len());
-        return Some(app_data.len());
-    }
-
-    match fc_chan
-        .fc_chan
-        .channel
-        .stream_priority(stream_id, 0, false)
-    {
-        Ok(()) => (),
-        Err(quiche::Error::StreamLimit) => (),
-        Err(quiche::Error::Done) => (),
-        Err(e) => panic!(
-            "Error while setting stream priority: {:?}",
-            e
-        ),
-    }
-
-    let written = match fc_chan
-        .fc_chan
-        .channel
-        .stream_send(stream_id, &app_data, true)
-    {
-        Ok(v) => v,
-        Err(quiche::Error::Done) => { return None; },
-        Err(e) => panic!("Other error: {:?}", e),
-    };
-
-    rtp_server.stream_written(written);
-    Some(written)
-}
-
-fn send_rtp_data_datagram(rtp_server: &mut RtpServer, fc_chan: &mut FcChannelInfo) -> Option<usize>{
-    let (_, app_data) = rtp_server.get_app_data()?;
+async fn send_rtp_data_datagram(rtp_server: &mut RtpAsyncHandler, fc_chan: &mut FcChannelInfo) -> Option<usize>{
+    let data = rtp_server.recv().await?;
 
     // if at least 1 receiver, send datagram, otherwise drop packet
     if fc_chan.number_receivers > 0{
         match fc_chan
             .fc_chan
             .channel
-            .dgram_send(&app_data)
+            .dgram_send(&data)
         {
             Ok(v) => v,
             Err(quiche::Error::Done) => {
-                debug!("{} couldn't write data", rtp_server.socket);
+                debug!("{} couldn't write data", fc_chan.fc_chan.mc_send_addr);
                 return None;
             },
             Err(e) => panic!("Other error: {:?}", e),
         };
 
-        debug!("Written {} bytes on {}", app_data.len(), rtp_server.socket)
+        debug!("Written {} bytes on {}", data.len(), fc_chan.fc_chan.mc_send_addr)
     }
-    rtp_server.stream_written(app_data.len());
-    Some(app_data.len())
+    Some(data.len())
 }
 
-fn update_receivers_counts(client: &mut Client, sources: &mut Vec<FcChannelInfo>) -> Option<()>{
+async fn update_receivers_counts(client: &mut Client, sources: &mut Vec<FcChannelInfo>, rtps: &mut Vec<RtpAsyncHandler>) -> Option<()>{
     let flexicast = client.conn.get_flexicast_attributes()?;
     let curr_channel = flexicast.get_mc_announce_data_active();
 
@@ -1256,6 +1190,10 @@ fn update_receivers_counts(client: &mut Client, sources: &mut Vec<FcChannelInfo>
                 client.current_channel_idx = None;
             }
         }
+    }
+
+    for (fc, rtp) in sources.iter().zip(rtps){
+        rtp.set_number_receivers(fc.number_receivers as usize).await;
     }
 
     Some(())
