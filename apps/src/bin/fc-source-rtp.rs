@@ -31,7 +31,6 @@ use quiche_apps::sendto::send_to;
 
 use ring::rand::SecureRandom;
 use ring::rand::SystemRandom;
-use tokio::sync::oneshot;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
@@ -547,7 +546,7 @@ async fn main() {
                 },
             };
 
-            update_receivers_counts(client, &mut fc_channels, &mut rtp_servers).await;
+            update_receivers_counts(client, &mut fc_channels).await;
 
             handle_path_events(client);
 
@@ -1165,7 +1164,7 @@ async fn send_rtp_data_datagram(rtp_server: &mut RtpAsyncHandler, fc_chan: &mut 
     Some(data.len())
 }
 
-async fn update_receivers_counts(client: &mut Client, sources: &mut Vec<FcChannelInfo>, rtps: &mut Vec<RtpAsyncHandler>) -> Option<()>{
+async fn update_receivers_counts(client: &mut Client, sources: &mut Vec<FcChannelInfo>) -> Option<()>{
     let flexicast = client.conn.get_flexicast_attributes()?;
     let curr_channel = flexicast.get_mc_announce_data_active();
 
