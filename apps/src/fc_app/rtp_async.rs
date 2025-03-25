@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, VecDeque}, convert::TryInto, net::SocketAddr, time::{Duration, Instant}};
 
-use tokio::{fs::File, io::AsyncWriteExt, net::UdpSocket, sync::mpsc::{self, error::TryRecvError, Receiver, Sender}};
+use tokio::{fs::File, io::AsyncWriteExt, net::UdpSocket, sync::mpsc::{self, error::TryRecvError, Receiver, Sender}, task::JoinHandle};
 
 use super::{pacer:: TokenPacer, rtp::RtpHeader};
 
@@ -46,10 +46,10 @@ impl RtpAsync{
             frame_count: 0,
         };
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             rtp.run_loop().await;
         });
-        RtpAsyncHandler { receiver: queue_receiver, sender: control_sender }
+        RtpAsyncHandler { handle, receiver: queue_receiver, sender: control_sender }
     }
 
     async fn handle_rtp(&mut self, rtp: &[u8]){
@@ -104,6 +104,8 @@ impl RtpAsync{
                     self.packets.push_front(packet);
                     return;
                 }
+            }else{
+                return; // come back later
             }
         }
     }
@@ -136,6 +138,7 @@ impl RtpAsync{
 }
 
 pub struct RtpAsyncHandler{
+    handle: JoinHandle<()>,
     sender: Sender<ControlMsg>,
     receiver: Receiver<RtpPacket>
 }

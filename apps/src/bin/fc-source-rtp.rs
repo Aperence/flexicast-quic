@@ -31,6 +31,7 @@ use quiche_apps::sendto::send_to;
 
 use ring::rand::SecureRandom;
 use ring::rand::SystemRandom;
+use tokio::sync::oneshot;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
@@ -145,14 +146,8 @@ struct Args {
     pacer_type: Option<PacerType>,
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::main(flavor = "multi_thread", worker_threads = 16)]
 async fn main() {
-    tokio::task::spawn_blocking(move ||{
-        main_server();
-    });
-}
-
-fn main_server() {
     env_logger::builder()
         .format_timestamp_nanos()
         .init();
@@ -590,6 +585,12 @@ fn main_server() {
             //    fc_chan.fc_chan.channel.on_mc_timeout(now).unwrap();
         }
         */
+
+        for (fc, rtp) in fc_channels.iter().zip(&mut rtp_servers){
+            // send control data to rtp server to tell to stop buffering packets
+            // if the number of receivers is 0
+            rtp.set_number_receivers(fc.number_receivers as usize).await;
+        }
 
         // Generate video content frames.
         // Repeat to ensure to dequeue all pending streams if needed.
@@ -1190,10 +1191,6 @@ async fn update_receivers_counts(client: &mut Client, sources: &mut Vec<FcChanne
                 client.current_channel_idx = None;
             }
         }
-    }
-
-    for (fc, rtp) in sources.iter().zip(rtps){
-        rtp.set_number_receivers(fc.number_receivers as usize).await;
     }
 
     Some(())
