@@ -145,7 +145,7 @@ struct Args {
     pacer_type: Option<PacerType>,
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 16)]
+#[tokio::main(flavor = "multi_thread", worker_threads = 6)]
 async fn main() {
     env_logger::builder()
         .format_timestamp_nanos()

@@ -49,7 +49,7 @@ impl RtpAsync{
         let handle = tokio::spawn(async move {
             rtp.run_loop().await;
         });
-        RtpAsyncHandler { handle, receiver: queue_receiver, sender: control_sender }
+        RtpAsyncHandler { _handle: handle, receiver: queue_receiver, sender: control_sender }
     }
 
     async fn handle_rtp(&mut self, rtp: &[u8]){
@@ -138,7 +138,7 @@ impl RtpAsync{
 }
 
 pub struct RtpAsyncHandler{
-    handle: JoinHandle<()>,
+    _handle: JoinHandle<()>,
     sender: Sender<ControlMsg>,
     receiver: Receiver<RtpPacket>
 }
