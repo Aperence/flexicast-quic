@@ -46,6 +46,10 @@ impl EXP3{
         self.probas = probas;
     }
 
+    pub fn probas(&self) -> &Vec<f64>{
+        &self.probas
+    }
+
     pub fn take_action(&mut self, banned: Vec<usize>) -> Result<usize, EXP3Error>{
         if self.taken_action.is_some(){
             return Err(EXP3Error::AlreadyTaken);

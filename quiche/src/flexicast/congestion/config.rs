@@ -23,22 +23,6 @@ impl From<FcCongestionHeuristic> for &'static FcCongestionHeuristicOps {
     }
 }
 
-/// Heuristict used by Flexicast for automatic group migration
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[repr(C)]
-pub enum FcEXP3Rewarder {
-    /// Use a loss reward function
-    LOSS       = 0,
-}
-
-impl From<FcEXP3Rewarder> for &'static EXP3Rewarder{
-    fn from(rewarder: FcEXP3Rewarder) -> Self {
-        match rewarder {
-            FcEXP3Rewarder::LOSS => &exp3::rewarder::LOSS_REWARDER
-        }
-    }
-}
-
 /// Configuration of the multicast congestion control
 pub trait FcCongestionConfig{
     /// Sets the delay between two successive sends of the MC_CONGESTION_INFO
@@ -52,7 +36,7 @@ pub trait FcCongestionConfig{
     fn set_fc_throughput_window(&mut self, v: Duration);
 
     /// Sets the reward function used for the EXP3 heuristic
-    fn set_fc_exp3_rewarder(&mut self, v: FcEXP3Rewarder);
+    fn set_fc_exp3_rewarder(&mut self, v: &'static EXP3Rewarder);
 
     /// Sets the loss threshold used for the EXP3 heuristic
     /// Automatically sets the hard loss threshold to 2x this value
@@ -84,10 +68,10 @@ impl FcCongestionConfig for Config{
         self.fc_congestion_heuristic = v;
     }
 
-    fn set_fc_exp3_rewarder(&mut self, v: FcEXP3Rewarder){
-        self.fc_exp3_conf.rewarder = v.into();
+    fn set_fc_exp3_rewarder(&mut self, v: &'static EXP3Rewarder){
+        self.fc_exp3_conf.rewarder = v;
     }
-    
+
     fn set_fc_exp3_loss_threshold(&mut self, v: f64) {
         self.fc_exp3_conf.loss_threshold = v;
         self.fc_exp3_conf.hard_loss_threshold = 2.0 * v;
@@ -96,11 +80,11 @@ impl FcCongestionConfig for Config{
     fn set_fc_exp3_hard_loss_threshold(&mut self, v: f64){
         self.fc_exp3_conf.hard_loss_threshold = v;
     }
-    
+
     fn set_fc_throughput_window(&mut self, v: Duration) {
         self.fc_throughput_window = v;
     }
-    
+
     fn set_fc_exp3_migration_timeout(&mut self, v: Duration) {
         self.fc_exp3_conf.migration_timeout = v;
     }

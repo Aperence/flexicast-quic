@@ -120,6 +120,8 @@ pub trait FlexicastCongestion {
     /// frame is received by a client
     fn mc_set_congestion_info(&mut self, info: FcCongestionInfo);
 
+    /// Gets the exp3 state.
+    fn fc_get_exp3_state(&self) -> Vec<Vec<f64>>;
 
     /// Whether a server should send a MC_CONGESTION_INFO frame
     /// or not
@@ -133,6 +135,10 @@ impl FlexicastCongestion for FlexicastAttributes{
 
     fn should_send_fc_congestion_info(&self) -> bool{
         self.congestion_state.should_send_congestion_info(Instant::now())
+    }
+
+    fn fc_get_exp3_state(&self) -> Vec<Vec<f64>>{
+        (&self.congestion_state.exp3_state).into()
     }
 }
 
@@ -206,7 +212,6 @@ impl FlexicastCongestionConnection for Connection{
         }
     }
 
-
     fn mc_get_cwnd(&self) -> Option<usize> {
         let fc_path_id = self.flexicast.as_ref()?.get_fc_path_id()? as usize;
         let cwnd = self.paths.get(fc_path_id).ok()?.recovery.cwnd();
@@ -242,6 +247,17 @@ bitflags::bitflags! {
         const Throughput = 0x01;
         /// Delay oriented
         const Delay = 0x02;
+    }
+}
+
+impl From<&EXP3State> for Vec<Vec<f64>>{
+    fn from(value: &EXP3State) -> Self {
+        let mut ret = Vec::new();
+        for (idx, exp3) in value.iter_instances().enumerate(){
+            let probas = exp3.probas();
+            ret.insert(idx, probas.clone());
+        }
+        ret
     }
 }
 

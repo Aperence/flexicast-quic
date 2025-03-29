@@ -82,7 +82,7 @@ fn exp3_did_change_channel(conn: &mut Connection){
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
-enum Action {
+pub enum Action {
     Increase = 0,
     Decrease = 1,
     Stay = 2
@@ -195,6 +195,15 @@ impl EXP3State {
             self.ban_increase_rounds = (1 << self.failed_increase_count) - 1;
         }
         debug!("EXP3: Number of failed increase: {}", self.failed_increase_count);
+    }
+
+    pub(crate) fn iter_instances(&self) -> impl Iterator<Item = &EXP3>{
+        let mut iter = Vec::new();
+        for channel in &self.ordered_channels{
+            let data = self.instances.get(channel).expect("Should not fail");
+            iter.push(data);
+        }
+        iter.into_iter()
     }
 }
 
