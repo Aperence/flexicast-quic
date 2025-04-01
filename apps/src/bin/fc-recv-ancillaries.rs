@@ -382,7 +382,7 @@ fn main() {
                 // initialize mc_states
                 if let Some(announce_data) = flexicast.get_mc_announce_data(args.idx_fc_chan){
                     let mut channels = Channels::new();
-                    channels.join_channel(args.idx_fc_chan, announce_data);
+                    channels.join_channel(args.idx_fc_chan, announce_data, &flexicast);
                     mc_states = Some(channels);
                 }
             }
@@ -578,25 +578,25 @@ fn check_migrate(args: &Args, conn: &mut Connection, mc_states: &mut Channels, s
     let channel_id = mc_states.changing_cid.as_ref()?;
     let multicast = conn.get_flexicast_attributes_mut()?;
 
+    let new_idx = multicast.get_mc_announce_data_index(&channel_id).unwrap();
+    let announce_data = multicast.get_mc_announce_data(new_idx).unwrap();
+
     if channel_id == &multicast.get_mc_announce_data_active().unwrap().channel_id{
         // no change, but we must reset the loss stats as this is a new Monitoring Interval
-        mc_states.get_loss_tracker_mut().reset();
-        mc_states.changing_cid = None;
+        mc_states.migration_done(new_idx, announce_data.bitrate.unwrap(), &multicast);
         conn.fc_did_change_channel();
         return None;
     }
 
     info!("Should change to channel {:?}", channel_id);
 
-    let new_idx = multicast.get_mc_announce_data_index(&channel_id).unwrap();
-    let announce_data = multicast.get_mc_announce_data(new_idx).unwrap();
-
     if mc_states.channels().count() == 0{
         info!("Joining new channel");
         // left previous, can finally add the state,
         // rest of pipeline (provide cid, probe path, join group, ...)
         // will be handled in the loop
-        mc_states.join_channel(new_idx, announce_data);
+        mc_states.migration_done(new_idx, announce_data.bitrate.unwrap(), &multicast);
+        mc_states.join_channel(new_idx, announce_data, &multicast);
     }else if let Some(channel) = mc_states.joined_channel(){
         conn.mc_leave_channel().unwrap();
         conn.abandon_path(channel.bind_addr, server_addr, 0).unwrap();

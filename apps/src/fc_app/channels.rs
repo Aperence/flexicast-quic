@@ -1,7 +1,7 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::{net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4}, time::SystemTime};
 
 use polling::{Event, Poller};
-use quiche::{flexicast::{congestion::FlexicastCongestionConnection, FlexicastConnection, McAnnounceData, McClientStatus, McRole}, Connection, ConnectionId};
+use quiche::{flexicast::{congestion::{FlexicastCongestion, FlexicastCongestionConnection}, FlexicastAttributes, FlexicastConnection, McAnnounceData, McClientStatus, McRole}, Connection, ConnectionId};
 
 use crate::fc_app::ssm::SSM;
 
@@ -214,7 +214,25 @@ impl Channels {
         }
     }
 
-    pub fn join_channel(&mut self, channel_idx: usize, announce_data: &McAnnounceData){
+    pub fn migration_done(&mut self, channel_idx: usize, bitrate: u64, flexicast: &FlexicastAttributes){
+        let now = SystemTime::now();
+        // log now the migration, as socket is definitively closed
+        self.stats.migrated(Migration {
+            new_channel_idx: channel_idx,
+            new_channel_bitrate: bitrate,
+            last_recv_timestamp: self.max_timestamp as i64,
+            time: now.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(),
+            exp3: flexicast.fc_get_exp3_state()
+        });
+
+        // and reset some metadata collected
+        self.max_timestamp = 0;
+        self.max_stream = 0;
+        self.rtp_loss_tracker.reset();
+        self.changing_cid = None;
+    }
+
+    pub fn join_channel(&mut self, channel_idx: usize, announce_data: &McAnnounceData, flexicast: &FlexicastAttributes){
         let bind_addr: SocketAddr = format!("0.0.0.0:{}", announce_data.udp_port).parse().unwrap();
         let group_addr: SocketAddr = SocketAddr::V4(SocketAddrV4::new(
             Ipv4Addr::from(announce_data.group_ip),
@@ -230,25 +248,14 @@ impl Channels {
             from_fc_change_channel: false
         });
 
-        if self.initial_channel_joined{
-            self.changing_cid = None;
-
-            // log now the migration, as socket is definitively closed
-            self.stats.migrated(Migration {
-                new_channel_idx: channel_idx,
-                new_channel_bitrate: announce_data.bitrate.unwrap(),
-                last_recv_timestamp: self.max_timestamp as i64
-            });
-
-            // and reset some metadata collected
-            self.max_timestamp = 0;
-            self.max_stream = 0;
-            self.rtp_loss_tracker.reset();
-        }else{
+        if !self.initial_channel_joined{
+            let now = SystemTime::now();
             self.stats.migrated(Migration{
                 new_channel_idx: channel_idx,
                 new_channel_bitrate: announce_data.bitrate.unwrap(),
-                last_recv_timestamp: -1
+                last_recv_timestamp: -1,
+                time: now.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64(),
+                exp3: flexicast.fc_get_exp3_state()
             });
             self.initial_channel_joined = true;
         }

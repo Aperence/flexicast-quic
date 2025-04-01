@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 pub struct Migration{
     pub new_channel_idx: usize,
     pub new_channel_bitrate: u64,
-    pub last_recv_timestamp: i64
+    pub last_recv_timestamp: i64,
+    pub time: f64,
+    pub exp3: Vec<Vec<f64>>
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -21,7 +23,6 @@ struct TimestampStats{
     losses: Vec<f64>,
     instant_losses: Vec<f64>
 }
-
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MultiChannelRecvStats{
