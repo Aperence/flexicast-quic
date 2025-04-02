@@ -147,7 +147,7 @@ impl Default for EXP3Conf{
             hard_loss_threshold: 2.0 * 0.05,
             k: 25.0,
             gamma: Some(0.15),
-            migration_timeout: Duration::from_secs(1),
+            migration_timeout: Duration::from_secs(5),
             rewarder: &LOSS_REWARDER
         }
     }

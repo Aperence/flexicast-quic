@@ -521,7 +521,7 @@ fn get_config(
     config.set_active_connection_id_limit(10);
     config.verify_peer(false);
     config.set_cc_algorithm(quiche::CongestionControlAlgorithm::CUBIC);
-    config.set_initial_max_path_id(10);
+    config.set_initial_max_path_id(100);
     config.enable_dgram(true, 10000, 10000);
 
     if args.flexicast {
