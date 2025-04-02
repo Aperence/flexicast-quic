@@ -28,42 +28,17 @@ pub struct ChannelState{
 }
 
 impl ChannelState{
-    pub fn should_join_multicast(&self, conn: &Connection) -> bool{
-        let flexicast = conn.get_flexicast_attributes().unwrap();
-
-        self.lifetime == ChannelLifetime::Bind &&
-        flexicast.get_mc_role() == McRole::Client(McClientStatus::ListenMcPath(true))
-    }
-
-    pub fn join_multicast(&mut self, conn: &mut Connection, proxy: bool, itf: IpAddr, source: IpAddr){
-        let flexicast = conn.get_flexicast_attributes().unwrap();
-        if !proxy {
-            info!("Join MULTICAST on ip {:?}", flexicast
-            .get_mc_announce_data(self.fc_chan_idx)
-            .unwrap()
-            .group_ip
-            .to_owned());
-
-            match (self.group_addr.ip(), itf, source){
-                (IpAddr::V4(ipv4_addr), IpAddr::V4(itf_addr), IpAddr::V4(source))  => {
-                    self.mc_socket
-                    .as_mut()
-                    .unwrap()
-                    .join_ssm_multicast_v4(
-                        &ipv4_addr,
-                        &itf_addr,
-                        &source
-                    )
-                    .unwrap();
-                },
-                (IpAddr::V6(_ipv6_addr), IpAddr::V6(_itf_addr), IpAddr::V4(_source)) => todo!(),
-                _ => error!("Incompatible type of addresses"),
-            }
+    pub fn provide_cid(&mut self, conn: &mut Connection){
+        if self.lifetime != ChannelLifetime::ProvideCid{
+            return;
         }
-        self.lifetime = ChannelLifetime::Joined;
 
-        // Inform flexicast that we effectively changed of channel
-        conn.fc_did_change_channel();
+        debug!("Add a new connection ID");
+        let mc_announce_data = self.get_mc_announce_data(conn);
+        let scid =
+            ConnectionId::from_ref(&mc_announce_data.channel_id);
+        conn.add_mc_cid(&scid).unwrap();
+        self.lifetime = ChannelLifetime::ProbePath;
     }
 
     fn get_group_ip(mc_announce_data: &McAnnounceData, local_ip: IpAddr, proxy: bool) -> SocketAddr{
@@ -80,6 +55,15 @@ impl ChannelState{
                 mc_announce_data.udp_port,
             ))
         }
+    }
+
+    fn get_mc_announce_data(&self, conn: &Connection) -> McAnnounceData{
+        conn
+            .get_flexicast_attributes()
+            .unwrap()
+            .get_mc_announce_data(self.fc_chan_idx)
+            .unwrap()
+            .to_owned()
     }
 
     pub fn probe(&mut self, conn: &mut Connection, poll: &mut Poller, local_ip: IpAddr, server_addr: SocketAddr, proxy: bool){
@@ -141,17 +125,42 @@ impl ChannelState{
         }
     }
 
-    pub fn provide_cid(&mut self, conn: &mut Connection){
-        if self.lifetime != ChannelLifetime::ProvideCid{
-            return;
-        }
+    pub fn should_join_multicast(&self, conn: &Connection) -> bool{
+        let flexicast = conn.get_flexicast_attributes().unwrap();
 
-        debug!("Add a new connection ID");
-        let mc_announce_data = self.get_mc_announce_data(conn);
-        let scid =
-            ConnectionId::from_ref(&mc_announce_data.channel_id);
-        conn.add_mc_cid(&scid).unwrap();
-        self.lifetime = ChannelLifetime::ProbePath;
+        self.lifetime == ChannelLifetime::Bind &&
+        flexicast.get_mc_role() == McRole::Client(McClientStatus::ListenMcPath(true))
+    }
+
+    pub fn join_multicast(&mut self, conn: &mut Connection, proxy: bool, itf: IpAddr, source: IpAddr){
+        let flexicast = conn.get_flexicast_attributes().unwrap();
+        if !proxy {
+            info!("Join MULTICAST on ip {:?}", flexicast
+            .get_mc_announce_data(self.fc_chan_idx)
+            .unwrap()
+            .group_ip
+            .to_owned());
+
+            match (self.group_addr.ip(), itf, source){
+                (IpAddr::V4(ipv4_addr), IpAddr::V4(itf_addr), IpAddr::V4(source))  => {
+                    self.mc_socket
+                    .as_mut()
+                    .unwrap()
+                    .join_ssm_multicast_v4(
+                        &ipv4_addr,
+                        &itf_addr,
+                        &source
+                    )
+                    .unwrap();
+                },
+                (IpAddr::V6(_ipv6_addr), IpAddr::V6(_itf_addr), IpAddr::V4(_source)) => todo!(),
+                _ => error!("Incompatible type of addresses"),
+            }
+        }
+        self.lifetime = ChannelLifetime::Joined;
+
+        // Inform flexicast that we effectively changed of channel
+        conn.fc_did_change_channel();
     }
 
     pub fn should_leave_multicast(&self) -> bool{
@@ -178,15 +187,6 @@ impl ChannelState{
             }
         }
         self.lifetime = ChannelLifetime::Left;
-    }
-
-    fn get_mc_announce_data(&self, conn: &Connection) -> McAnnounceData{
-        conn
-            .get_flexicast_attributes()
-            .unwrap()
-            .get_mc_announce_data(self.fc_chan_idx)
-            .unwrap()
-            .to_owned()
     }
 }
 

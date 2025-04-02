@@ -518,7 +518,7 @@ fn get_config(
     config.set_initial_max_stream_data_uni(100_000_000_000);
     config.set_initial_max_streams_bidi(100_000_000_000);
     config.set_initial_max_streams_uni(100_000_000_000);
-    config.set_active_connection_id_limit(10);
+    config.set_active_connection_id_limit(100);
     config.verify_peer(false);
     config.set_cc_algorithm(quiche::CongestionControlAlgorithm::CUBIC);
     config.set_initial_max_path_id(100);

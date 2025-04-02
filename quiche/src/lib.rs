@@ -8803,6 +8803,8 @@ impl Connection {
                     &mut retired_path_ids,
                 );
 
+                debug!("PathConn Result: {:?}", new_dcid_res);
+
                 for (dcid_seq, _nw_path) in retired_path_ids {
                     if let Some(pid) = self.paths.pid_from_path_id(path_id) {
                         let path = self.paths.get_mut(pid)?;
@@ -8966,9 +8968,11 @@ impl Connection {
                                         dst_addr,
                                         mc_announce.udp_port,
                                     );
+                                    debug!("Before creating the mc path on server");
                                     let fc_space_id = self.create_mc_path(
                                         src_addr, dst_addr, false,
                                     )?;
+                                    debug!("After creating the mc path on server");
                                     self.flexicast
                                         .as_mut()
                                         .unwrap()
