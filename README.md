@@ -1,3 +1,24 @@
+# FFSexp3: Flexible Flow Selection algorithm based on EXP3
+
+This repository contains the source code of the FFSexp3 algorithm, implemented with Flexicast QUIC
+
+## Contributions
+
+In this repository, we provide an implementation of the ffsexp3 algorithm, located in the `flexicast/congestion` folder.
+
+Additionally, we provide two minimal command-line utilities allowing to transmit a video stream.
+The first program, `fc-source-rtp`, allows to run a source and the second, `fc-ffsexp3-recv` allows to run a receiver
+with the ffsexp3 algorithm.
+
+
+## Compilation
+
+To compile the code, simply run
+
+```
+cargo build [--release] [--bin fc-source-rtp/fc-ffsexp3-recv]
+```
+
 ![quiche](quiche.svg)
 
 [![crates.io](https://img.shields.io/crates/v/quiche.svg)](https://crates.io/crates/quiche)
