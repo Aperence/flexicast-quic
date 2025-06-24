@@ -269,9 +269,10 @@ fn main() {
         ];
         let timeout = timers.iter().flatten().min().copied();
 
-        poll.wait(&mut events, timeout).unwrap();
-
         rearm_poll(&mut poll, &socket, &mc_states);
+
+        events.clear();
+        poll.wait(&mut events, timeout).unwrap();
 
         // Read incoming UDP packets from the socket and feed them to quiche,
         // until there are no more packets to read.
